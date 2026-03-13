@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
 
 const navItems = [
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -295,6 +296,7 @@ function createNewTemplateDraft(sectors) {
 function AdminDashboard() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { signOut } = useAuth();
   const [activeView, setActiveView] = useState("dashboard");
   const [users, setUsers] = useState(initialUsers);
   const [selectedUsername, setSelectedUsername] = useState(initialUsers[0].username);
@@ -703,6 +705,16 @@ function AdminDashboard() {
     }));
   };
 
+  const handleLogout = async () => {
+    try {
+      await signOut();
+      navigate("/login", { replace: true });
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error("Logout failed", error);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#f4f7f6] text-[#121826]">
       <div className="mx-auto grid min-h-screen w-full max-w-[1600px] lg:grid-cols-[300px_1fr]">
@@ -785,6 +797,7 @@ function AdminDashboard() {
               </div>
               <button
                 className="rounded-lg p-2 text-slate-500 hover:bg-white"
+                onClick={handleLogout}
                 type="button"
               >
                 <LogOut className="h-5 w-5" />

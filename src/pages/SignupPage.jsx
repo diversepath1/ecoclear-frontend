@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useState } from "react";
+import { getRouteForRole, useAuth } from "../context/AuthContext";
 import AuthCard from "../components/auth/AuthCard";
 import AuthInput from "../components/auth/AuthInput";
 import AuthPageLayout from "../components/auth/AuthPageLayout";
@@ -21,6 +22,7 @@ import PrimaryButton from "../components/auth/PrimaryButton";
 
 function SignupPage() {
   const navigate = useNavigate();
+  const { signUpWithCredentials } = useAuth();
   const [form, setForm] = useState({
     fullName: "",
     organization: "",
@@ -31,6 +33,8 @@ function SignupPage() {
     agreed: false,
   });
   const [errors, setErrors] = useState({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [successMessage, setSuccessMessage] = useState("");
 
   const updateField = (field) => (event) => {
     const value = field === "agreed" ? event.target.checked : event.target.value;
@@ -38,7 +42,7 @@ function SignupPage() {
     setErrors((current) => ({ ...current, [field]: "" }));
   };
 
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault();
 
     const nextErrors = {};
@@ -69,8 +73,37 @@ function SignupPage() {
       return;
     }
 
-    console.log("EcoClear signup", form);
-    navigate("/login");
+    setIsSubmitting(true);
+    setSuccessMessage("");
+
+    const username = buildUsername(form.fullName, form.email);
+
+    const { data, error } = await signUpWithCredentials({
+      username,
+      email: form.email,
+      mobile_no: form.phone,
+      full_name: form.fullName,
+      password: form.password,
+      role: "proponent",
+    });
+
+    if (error) {
+      setErrors((current) => ({ ...current, email: error.message }));
+      setIsSubmitting(false);
+      return;
+    }
+
+    setIsSubmitting(false);
+
+    if (data?.profile) {
+      navigate(getRouteForRole(data.profile.role), { replace: true });
+      return;
+    }
+
+    setSuccessMessage(
+      "Account created successfully. Please sign in with your email and password.",
+    );
+    navigate("/login", { replace: true });
   };
 
   return (
@@ -183,11 +216,18 @@ function SignupPage() {
             <PrimaryButton
               className="w-full justify-center"
               icon={ArrowRight}
+              disabled={isSubmitting}
               type="submit"
             >
-              Create Proponent Account
+              {isSubmitting ? "Creating account..." : "Create Proponent Account"}
             </PrimaryButton>
           </form>
+
+          {successMessage ? (
+            <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">
+              {successMessage}
+            </p>
+          ) : null}
 
           <p className="text-center text-sm text-slate-500">
             Already have an account?{" "}
@@ -202,6 +242,15 @@ function SignupPage() {
       </div>
     </AuthPageLayout>
   );
+}
+
+function buildUsername(fullName, email) {
+  const emailPart = email.split("@")[0] || "user";
+  const normalizedName = fullName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const base = normalizedName || emailPart.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return `${base}${Math.floor(Math.random() * 1000)
+    .toString()
+    .padStart(3, "0")}`;
 }
 
 function SignupAside() {

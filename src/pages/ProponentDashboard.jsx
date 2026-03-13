@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
 
 const seedApplications = [
   {
@@ -55,6 +56,7 @@ const sectorCategories = [
 function ProponentDashboard() {
   const location = useLocation();
   const navigate = useNavigate();
+  const { signOut } = useAuth();
   const [activeView, setActiveView] = useState("dashboard");
   const [applications, setApplications] = useState(seedApplications);
   const [creationMessage, setCreationMessage] = useState("");
@@ -205,6 +207,16 @@ function ProponentDashboard() {
     }
   };
 
+  const handleLogout = async () => {
+    try {
+      await signOut();
+      navigate("/login", { replace: true });
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error("Logout failed", error);
+    }
+  };
+
   return (
     <div className="dashboard-root">
       <div className="dashboard-shell">
@@ -271,6 +283,9 @@ function ProponentDashboard() {
               >
                 <PlusIcon />
                 <span>New Application</span>
+              </button>
+              <button className="dashboard-ghost-button" onClick={handleLogout} type="button">
+                Logout
               </button>
             </div>
           </header>

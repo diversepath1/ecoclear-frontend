@@ -6,6 +6,7 @@ import {
   Download,
   FileText,
   LayoutDashboard,
+  LogOut,
   Plus,
   Search,
   Settings,
@@ -14,6 +15,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
 
 const initialScrutinyCases = [
   {
@@ -87,6 +89,7 @@ const sidebarItems = [
 function ScrutinyDashboard() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { signOut } = useAuth();
   const [cases, setCases] = useState(initialScrutinyCases);
   const [reviewNote, setReviewNote] = useState("");
 
@@ -176,6 +179,16 @@ function ScrutinyDashboard() {
     navigate("/scrutiny-dashboard/deficiencies");
   };
 
+  const handleLogout = async () => {
+    try {
+      await signOut();
+      navigate("/login", { replace: true });
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error("Logout failed", error);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#f4f7f6] text-[#111827]">
       <div className="mx-auto grid min-h-screen w-full max-w-[1600px] lg:grid-cols-[300px_1fr]">
@@ -259,6 +272,14 @@ function ScrutinyDashboard() {
               >
                 <Plus className="h-[18px] w-[18px]" />
                 New Case
+              </button>
+              <button
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-[22px] font-semibold text-[#445a78] hover:bg-slate-50"
+                onClick={handleLogout}
+                type="button"
+              >
+                <LogOut className="h-[18px] w-[18px]" />
+                Logout
               </button>
             </div>
           </header>

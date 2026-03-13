@@ -1,6 +1,7 @@
-import { ArrowRight, LockKeyhole, ShieldCheck, User } from "lucide-react";
+import { ArrowRight, LockKeyhole, Mail, ShieldCheck } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useState } from "react";
+import { getRouteForRole, useAuth } from "../context/AuthContext";
 import AuthCard from "../components/auth/AuthCard";
 import AuthInput from "../components/auth/AuthInput";
 import AuthPageLayout from "../components/auth/AuthPageLayout";
@@ -12,12 +13,14 @@ import PrimaryButton from "../components/auth/PrimaryButton";
 
 function LoginPage() {
   const navigate = useNavigate();
+  const { signInWithCredentials } = useAuth();
   const [form, setForm] = useState({
-    username: "",
+    email: "",
     password: "",
     staySignedIn: true,
   });
   const [errors, setErrors] = useState({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleChange = (field) => (event) => {
     const value =
@@ -26,13 +29,15 @@ function LoginPage() {
     setErrors((current) => ({ ...current, [field]: "" }));
   };
 
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault();
 
     const nextErrors = {};
 
-    if (!form.username.trim()) {
-      nextErrors.username = "Username is required.";
+    if (!form.email.trim()) {
+      nextErrors.email = "Email is required.";
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) {
+      nextErrors.email = "Enter a valid email address.";
     }
 
     if (!form.password.trim()) {
@@ -45,32 +50,24 @@ function LoginPage() {
       return;
     }
 
-    console.log("EcoClear login", form);
+    setIsSubmitting(true);
 
-    if (form.username === "admin" && form.password === "admin") {
-      navigate("/admin-dashboard");
-      return;
-    }
-
-    if (form.username === "user" && form.password === "user") {
-      navigate("/proponent-dashboard");
-      return;
-    }
-
-    if (form.username === "scrutiny" && form.password === "scrutiny") {
-      navigate("/scrutiny-dashboard");
-      return;
-    }
-
-    if (form.username === "mom" && form.password === "mom") {
-      navigate("/mom-dashboard");
-      return;
-    }
-
-    setErrors({
-      username: "Invalid username or password.",
-      password: "Invalid username or password.",
+    const { data, error } = await signInWithCredentials({
+      email: form.email,
+      password: form.password,
     });
+
+    if (error || !data?.profile) {
+      setErrors({
+        email: error?.message || "Invalid email or password.",
+        password: error?.message || "Invalid email or password.",
+      });
+      setIsSubmitting(false);
+      return;
+    }
+
+    setIsSubmitting(false);
+    navigate(getRouteForRole(data.profile.role), { replace: true });
   };
 
   return (
@@ -96,14 +93,14 @@ function LoginPage() {
         >
           <form className="space-y-5" onSubmit={handleSubmit}>
             <AuthInput
-              autoComplete="username"
-              error={errors.username}
-              icon={User}
-              label="Username"
-              onChange={handleChange("username")}
-              placeholder="Enter your username"
-              type="text"
-              value={form.username}
+              autoComplete="email"
+              error={errors.email}
+              icon={Mail}
+              label="Email Address"
+              onChange={handleChange("email")}
+              placeholder="Enter your email address"
+              type="email"
+              value={form.email}
             />
 
             <div className="space-y-3">
@@ -134,9 +131,10 @@ function LoginPage() {
             <PrimaryButton
               className="w-full justify-center"
               icon={ArrowRight}
+              disabled={isSubmitting}
               type="submit"
             >
-              Sign in to Dashboard
+              {isSubmitting ? "Signing in..." : "Sign in to Dashboard"}
             </PrimaryButton>
           </form>
 

@@ -7,6 +7,7 @@ import {
   FilePenLine,
   FileText,
   LayoutDashboard,
+  LogOut,
   Search,
   Settings,
   ShieldCheck,
@@ -14,6 +15,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
 
 const MOM_STORAGE_KEY = "ecoclear_mom_cases";
 
@@ -108,6 +110,7 @@ const sidebarItems = [
 function MoMDashboard() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { signOut } = useAuth();
   const [cases, setCases] = useState(() => loadMomCases());
 
   const currentView = useMemo(() => parseMomView(location.pathname), [location.pathname]);
@@ -252,6 +255,16 @@ function MoMDashboard() {
     navigate("/mom-dashboard/referred-cases");
   };
 
+  const handleLogout = async () => {
+    try {
+      await signOut();
+      navigate("/login", { replace: true });
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error("Logout failed", error);
+    }
+  };
+
   const activeSidebarKey =
     currentView.type === "editor"
       ? "meeting-scheduled"
@@ -332,6 +345,14 @@ function MoMDashboard() {
                 <p className="text-sm text-slate-500">MoM Specialist</p>
               </div>
               <div className="h-10 w-10 rounded-full bg-slate-200" />
+              <button
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[18px] font-semibold text-[#445a78] hover:bg-slate-50"
+                onClick={handleLogout}
+                type="button"
+              >
+                <LogOut className="h-4 w-4" />
+                Logout
+              </button>
             </div>
           </header>
 
