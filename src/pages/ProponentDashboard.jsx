@@ -29,6 +29,7 @@ function ProponentDashboard() {
   const [applicationsError, setApplicationsError] = useState("");
   const [isSubmittingApplication, setIsSubmittingApplication] = useState(false);
   const [deficiencyCaseId, setDeficiencyCaseId] = useState(null);
+  const [editingDraftId, setEditingDraftId] = useState(null);
   const [creationMessage, setCreationMessage] = useState("");
   const [form, setForm] = useState({
     projectName: "",
@@ -41,6 +42,7 @@ function ProponentDashboard() {
   const [sectorsLoading, setSectorsLoading] = useState(true);
   const [sectorsError, setSectorsError] = useState("");
   const fileInputRef = useRef(null);
+  const draftEditorInitRef = useRef(false);
 
   const dashboardNavItems = [
     { key: "dashboard", label: "Dashboard", icon: <DashboardIcon /> },
@@ -86,16 +88,27 @@ function ProponentDashboard() {
     () => new URLSearchParams(location.search).get("workflow"),
     [location.search],
   );
+  const draftEditQueryId = useMemo(
+    () => new URLSearchParams(location.search).get("editDraft"),
+    [location.search],
+  );
   const workflowApplication = useMemo(
     () =>
       applications.find((application) => application.id === workflowApplicationId) ?? null,
     [applications, workflowApplicationId],
   );
+  const editingDraft = useMemo(
+    () => applications.find((application) => application.dbId === editingDraftId) ?? null,
+    [applications, editingDraftId],
+  );
 
   const selectView = (view) => {
     setActiveView(view);
     if (view !== "my-apps") setCreationMessage("");
-    if (view !== "new-app") setDeficiencyCaseId(null);
+    if (view !== "new-app") {
+      setDeficiencyCaseId(null);
+      setEditingDraftId(null);
+    }
   };
 
   const openWorkflowWindow = (applicationId) => {
@@ -110,6 +123,7 @@ function ProponentDashboard() {
     if (!application?.dbId) return;
 
     setDeficiencyCaseId(application.dbId);
+    setEditingDraftId(null);
     setForm({
       projectName: application.name || "",
       category: application.category || "",
@@ -119,6 +133,16 @@ function ProponentDashboard() {
     setFormErrors({});
     setCreationMessage("");
     setActiveView("new-app");
+  };
+
+  const openDraftEditorWindow = (application) => {
+    if (!application?.dbId) return;
+
+    window.open(
+      `/proponent-dashboard?editDraft=${encodeURIComponent(application.dbId)}`,
+      "_blank",
+      "noopener,noreferrer",
+    );
   };
 
   const handleFormChange = (field) => (event) => {
@@ -163,6 +187,8 @@ function ProponentDashboard() {
       id: row?.application_code || row?.id || "N/A",
       name: row?.project_name || "Untitled Application",
       category: row?.sector_category || "Not Selected",
+      allowMultipleFiles: row?.allow_multiple_files ?? true,
+      documentCount: Number(row?.document_count ?? 0),
       status,
       date:
         status === "Draft"
@@ -186,7 +212,7 @@ function ProponentDashboard() {
     const { data, error } = await supabase
       .from("applications")
       .select(
-        "id, application_code, project_name, sector_category, status, submitted_at, created_at, deficiency_message",
+        "id, application_code, project_name, sector_category, status, submitted_at, created_at, deficiency_message, allow_multiple_files, document_count",
       )
       .eq("proponent_id", user.id)
       .order("created_at", { ascending: false });
@@ -242,6 +268,8 @@ function ProponentDashboard() {
   const createApplication = async (status) => {
     const nextErrors = {};
     const isDeficiencyResubmission = Boolean(deficiencyCaseId);
+    const isDraftEditFlow = Boolean(editingDraftId) && !isDeficiencyResubmission;
+    const existingDocumentCount = editingDraft?.documentCount ?? 0;
 
     if (!isDeficiencyResubmission && status === "submitted") {
       if (!form.projectName.trim()) nextErrors.projectName = "Project name is required.";
@@ -249,7 +277,8 @@ function ProponentDashboard() {
     }
 
     if (status === "submitted" || isDeficiencyResubmission) {
-      if (selectedFiles.length === 0) {
+      const requiresNewFiles = !(isDraftEditFlow && existingDocumentCount > 0);
+      if (selectedFiles.length === 0 && requiresNewFiles) {
         nextErrors.documents = "At least one PDF file is required.";
       } else if (!selectedFiles.every((file) => isPdfFile(file))) {
         nextErrors.documents = "Only PDF files are allowed.";
@@ -297,6 +326,71 @@ function ProponentDashboard() {
         setFormErrors((current) => ({
           ...current,
           submit: error?.message || "Failed to upload deficiency documents.",
+        }));
+      } finally {
+        setIsSubmittingApplication(false);
+      }
+      return;
+    }
+
+    if (isDraftEditFlow) {
+      const updatedStatus = status === "submitted" ? "submitted" : "draft";
+      const nextDocumentCount =
+        selectedFiles.length > 0
+          ? existingDocumentCount + selectedFiles.length
+          : existingDocumentCount;
+
+      const updatePayload = {
+        project_name:
+          status === "draft" ? form.projectName.trim() || "Untitled Draft" : form.projectName.trim(),
+        sector_category:
+          status === "draft" ? form.category.trim() || "Not Selected" : form.category.trim(),
+        status: updatedStatus,
+        allow_multiple_files: allowMultipleFiles,
+        document_count: nextDocumentCount,
+        submitted_at: status === "submitted" ? new Date().toISOString() : null,
+      };
+
+      const { error: updateError } = await supabase
+        .from("applications")
+        .update(updatePayload)
+        .eq("id", editingDraftId)
+        .eq("proponent_id", user.id);
+
+      if (updateError) {
+        setIsSubmittingApplication(false);
+        setFormErrors((current) => ({
+          ...current,
+          submit: updateError?.message || "Failed to update draft.",
+        }));
+        return;
+      }
+
+      try {
+        if (selectedFiles.length > 0) {
+          await uploadApplicationDocuments(editingDraftId, selectedFiles);
+        }
+
+        setForm({ projectName: "", category: "" });
+        setSelectedFiles([]);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        setFormErrors({});
+        setEditingDraftId(null);
+
+        setCreationMessage(
+          status === "draft"
+            ? "Draft updated successfully. You can keep editing or submit later."
+            : "Draft submitted successfully and moved for review.",
+        );
+
+        await loadApplications();
+        setActiveView("my-apps");
+      } catch (error) {
+        setFormErrors((current) => ({
+          ...current,
+          submit:
+            error?.message ||
+            "Draft was updated, but document upload failed. Please contact admin.",
         }));
       } finally {
         setIsSubmittingApplication(false);
@@ -390,6 +484,39 @@ function ProponentDashboard() {
   useEffect(() => {
     loadApplications();
   }, [user?.id]);
+
+  useEffect(() => {
+    if (!draftEditQueryId) {
+      draftEditorInitRef.current = false;
+      return;
+    }
+
+    if (applicationsLoading || draftEditorInitRef.current) return;
+
+    const draftApplication =
+      applications.find((application) => application.dbId === draftEditQueryId) ?? null;
+    draftEditorInitRef.current = true;
+
+    if (!draftApplication) {
+      setCreationMessage("Draft not found for editing.");
+      navigate("/proponent-dashboard", { replace: true });
+      return;
+    }
+
+    setDeficiencyCaseId(null);
+    setEditingDraftId(draftApplication.dbId);
+    setForm({
+      projectName: draftApplication.name || "",
+      category: draftApplication.category || "",
+    });
+    setAllowMultipleFiles(Boolean(draftApplication.allowMultipleFiles ?? true));
+    setSelectedFiles([]);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    setFormErrors({});
+    setCreationMessage("");
+    setActiveView("new-app");
+    navigate("/proponent-dashboard", { replace: true });
+  }, [applications, applicationsLoading, draftEditQueryId, navigate]);
 
   const handleLogout = async () => {
     try {
@@ -534,7 +661,10 @@ function ProponentDashboard() {
                       Loading applications from database...
                     </div>
                   ) : (
-                    <ApplicationsTable applications={recentApplications} />
+                    <ApplicationsTable
+                      applications={recentApplications}
+                      onOpenDraft={openDraftEditorWindow}
+                    />
                   )}
 
                   <div className="dashboard-panel-footer">
@@ -589,11 +719,19 @@ function ProponentDashboard() {
               <section className="space-y-6">
                 <section className="dashboard-heading">
                   <div>
-                    <h1>{deficiencyCase ? "Resolve Deficiency" : "New Application"}</h1>
+                    <h1>
+                      {deficiencyCase
+                        ? "Resolve Deficiency"
+                        : editingDraftId
+                          ? "Edit Draft Application"
+                          : "New Application"}
+                    </h1>
                     <p>
                       {deficiencyCase
                         ? "Upload corrected documents for the flagged application."
-                        : "Create an environmental clearance application for review."}
+                        : editingDraftId
+                          ? "Continue editing your saved draft and submit when ready."
+                          : "Create an environmental clearance application for review."}
                     </p>
                   </div>
                 </section>
@@ -719,7 +857,11 @@ function ProponentDashboard() {
                           onClick={handleSaveDraft}
                           type="button"
                         >
-                          {isSubmittingApplication ? "Saving..." : "Save as Draft"}
+                          {isSubmittingApplication
+                            ? "Saving..."
+                            : editingDraftId
+                              ? "Update Draft"
+                              : "Save as Draft"}
                         </button>
                       ) : null}
                       <button
@@ -730,10 +872,12 @@ function ProponentDashboard() {
                         <PlusIcon />
                         <span>
                           {isSubmittingApplication
-                            ? "Creating..."
+                            ? "Saving..."
                             : deficiencyCase
                               ? "Upload Documents & Resubmit"
-                              : "Create Application & Pay"}
+                              : editingDraftId
+                                ? "Update Application & Pay"
+                                : "Create Application & Pay"}
                         </span>
                       </button>
                       <button
@@ -787,6 +931,7 @@ function ProponentDashboard() {
                     <ApplicationsTable
                       applications={applications}
                       enableWorkflowLinks
+                      onOpenDraft={openDraftEditorWindow}
                       onOpenDeficiency={openDeficiencyResolution}
                       onOpenWorkflow={openWorkflowWindow}
                     />
@@ -827,6 +972,7 @@ function ProponentDashboard() {
 function ApplicationsTable({
   applications,
   enableWorkflowLinks = false,
+  onOpenDraft,
   onOpenDeficiency,
   onOpenWorkflow,
 }) {
@@ -919,7 +1065,22 @@ function ApplicationsTable({
                     )
                   ) : null}
 
-                  {application.status !== "Finalized" && application.status !== "Deficiency" ? (
+                  {application.status === "Draft" ? (
+                    onOpenDraft ? (
+                      <button
+                        className="inline-flex items-center rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-[#124734] hover:bg-[#f2f8f4]"
+                        onClick={() => onOpenDraft(application)}
+                        title="Open draft in New Application"
+                        type="button"
+                      >
+                        Edit Draft
+                      </button>
+                    ) : null
+                  ) : null}
+
+                  {application.status !== "Finalized" &&
+                  application.status !== "Deficiency" &&
+                  application.status !== "Draft" ? (
                     <button className="table-action" title="More actions" type="button">
                       <MoreIcon />
                     </button>
