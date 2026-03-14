@@ -176,10 +176,11 @@ function ProponentDashboard() {
     }
   };
 
-  const mapDbApplicationToViewModel = (row) => {
+  const mapDbApplicationToViewModel = (row, gistRow) => {
     const status = mapStatusLabel(row?.status);
     const submittedAt = row?.submitted_at ? new Date(row.submitted_at) : null;
     const createdAt = row?.created_at ? new Date(row.created_at) : null;
+    const gistJson = asObject(gistRow?.gist_json);
 
     return {
       dbId: row?.id || null,
@@ -195,6 +196,8 @@ function ProponentDashboard() {
           ? "Not Submitted"
           : toDisplayDate(submittedAt || createdAt || new Date()),
       deficiencyMessage: row?.deficiency_message || "",
+      meetingGistText: String(gistRow?.gist_text ?? ""),
+      finalizedMinutes: asObject(gistJson?.minutes),
     };
   };
 
@@ -224,7 +227,36 @@ function ProponentDashboard() {
       return;
     }
 
-    setApplications((data ?? []).map(mapDbApplicationToViewModel));
+    const applicationRows = data ?? [];
+    if (applicationRows.length === 0) {
+      setApplications([]);
+      setApplicationsLoading(false);
+      return;
+    }
+
+    const applicationIds = applicationRows.map((row) => row.id).filter(Boolean);
+    let gistByApplicationId = new Map();
+
+    if (applicationIds.length > 0) {
+      const { data: gistRows, error: gistError } = await supabase
+        .from("meeting_gists")
+        .select("application_id, gist_text, gist_json")
+        .in("application_id", applicationIds);
+
+      if (gistError) {
+        setApplicationsError(gistError.message || "Failed to load meeting minutes.");
+      } else {
+        gistByApplicationId = new Map(
+          (gistRows ?? []).map((row) => [row.application_id, row]),
+        );
+      }
+    }
+
+    setApplications(
+      applicationRows.map((row) =>
+        mapDbApplicationToViewModel(row, gistByApplicationId.get(row.id)),
+      ),
+    );
     setApplicationsLoading(false);
   };
 
@@ -1195,17 +1227,11 @@ function formatCount(value) {
 
 function exportApplicationRecord(application, format) {
   const fileName =
-    `${application.id}-${format === "word" ? "application.doc" : "application.pdf"}`.replace(
+    `${application.id}-${format === "word" ? "finalized-mom.doc" : "finalized-mom.pdf"}`.replace(
       /\s+/g,
       "_",
     );
-  const content = [
-    `Application ID: ${application.id}`,
-    `Project Name: ${application.name}`,
-    `Category: ${application.category}`,
-    `Status: ${application.status}`,
-    `Date Submitted: ${application.date}`,
-  ].join("\n");
+  const content = buildFinalizedMomExportContent(application);
 
   const mimeType = format === "word" ? "application/msword" : "application/pdf";
   const blob = new Blob([content], { type: mimeType });
@@ -1217,6 +1243,70 @@ function exportApplicationRecord(application, format) {
   anchor.click();
   document.body.removeChild(anchor);
   URL.revokeObjectURL(url);
+}
+
+function buildFinalizedMomExportContent(application) {
+  const minutes = asObject(application?.finalizedMinutes);
+  const asText = (value) => {
+    if (Array.isArray(value)) return value.join("\n");
+    if (value && typeof value === "object") return JSON.stringify(value, null, 2);
+    return String(value ?? "").trim();
+  };
+
+  const sections = [
+    `Application ID: ${application.id}`,
+    `Project Name: ${application.name}`,
+    `Category: ${application.category}`,
+    `Status: ${application.status}`,
+    `Date Submitted: ${application.date}`,
+    "",
+    "Finalized Minutes of Meeting",
+    "----------------------------",
+    `Meeting Title: ${asText(minutes.meetingTitle || application.name) || "Not available"}`,
+    `Meeting Type: ${asText(minutes.meetingType) || "Not available"}`,
+    `Date: ${asText(minutes.date) || "Not available"}`,
+    `Time: ${asText(minutes.time) || "Not available"}`,
+    `Location: ${asText(minutes.location) || "Not available"}`,
+    `Chairperson: ${asText(minutes.chairperson) || "Not available"}`,
+    `Minute Taker: ${asText(minutes.minuteTaker) || "Not available"}`,
+    "",
+    "Participants:",
+    asText(minutes.participants) || "Not available",
+    "",
+    "Agenda Items:",
+    asText(minutes.agendaItems) || "Not available",
+    "",
+    "Summary of Discussion:",
+    asText(minutes.discussionSummary) || "Not available",
+    "",
+    "Decisions Taken:",
+    asText(minutes.decisionsTaken) || "Not available",
+    "",
+    "Action Items:",
+    asText(minutes.actionItems) || "Not available",
+    "",
+    "Risks / Concerns Raised:",
+    asText(minutes.risks) || "Not available",
+    "",
+    "Next Steps:",
+    asText(minutes.nextSteps) || "Not available",
+    "",
+    "Next Meeting Schedule:",
+    asText(minutes.nextMeetingSchedule) || "Not available",
+  ];
+
+  if (!Object.keys(minutes).length && application?.meetingGistText) {
+    sections.push("", "AI Meeting Gist:", application.meetingGistText);
+  }
+
+  return sections.join("\n");
+}
+
+function asObject(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value;
+  }
+  return {};
 }
 
 function toDisplayDate(value) {

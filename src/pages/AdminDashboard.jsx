@@ -288,7 +288,7 @@ function AdminDashboard() {
     [applicationStageCounts],
   );
 
-  const submittedOrderCount = useMemo(
+  const pendingWorkflowOrderCount = useMemo(
     () =>
       (applicationStageCounts.submitted ?? 0) +
       (applicationStageCounts.deficiency ?? 0) +
@@ -299,8 +299,11 @@ function AdminDashboard() {
   );
 
   const finalizedOrderCount = applicationStageCounts.finalized ?? 0;
+  const totalApplicationsCount = pendingWorkflowOrderCount + finalizedOrderCount;
   const ordersCompletedPercent =
-    submittedOrderCount > 0 ? (finalizedOrderCount / submittedOrderCount) * 100 : 0;
+    totalApplicationsCount > 0
+      ? (finalizedOrderCount / totalApplicationsCount) * 100
+      : 0;
 
   useEffect(() => {
     if (!users.length) {
@@ -550,7 +553,7 @@ function AdminDashboard() {
     },
     {
       label: "Pending Actions",
-      value: `${submittedOrderCount.toLocaleString()} Issues`,
+      value: `${pendingWorkflowOrderCount.toLocaleString()} Issues`,
       note: `${applicationStageCounts.deficiency.toLocaleString()} Urgent`,
       noteClass: "text-rose-600",
       icon: FileText,
@@ -559,7 +562,7 @@ function AdminDashboard() {
     {
       label: "Total % Orders Completed",
       value: `${ordersCompletedPercent.toFixed(1)}%`,
-      note: `Finalized ${finalizedOrderCount.toLocaleString()} of ${submittedOrderCount.toLocaleString()} submitted workflow orders`,
+      note: `Finalized ${finalizedOrderCount.toLocaleString()} of ${totalApplicationsCount.toLocaleString()} total workflow applications`,
       noteClass: "text-emerald-600",
       icon: CheckCircle2,
       iconWrap: "bg-emerald-100 text-emerald-700",
@@ -1039,6 +1042,7 @@ function AdminDashboard() {
                 onRetryApplications={loadApplications}
                 stageData={stageData}
                 stats={stats}
+                totalApplicationsCount={totalApplicationsCount}
               />
             ) : null}
             {activeView === "users" ? (
@@ -1166,6 +1170,7 @@ function DashboardView({
   applicationsLoading,
   applicationsError,
   onRetryApplications,
+  totalApplicationsCount,
 }) {
   const highestWorkflowCount = Math.max(...stageData.map((item) => item.value), 0);
   const yAxisMax = Math.max(highestWorkflowCount, 1);
@@ -1248,6 +1253,9 @@ function DashboardView({
               </h2>
               <p className="mt-1 text-[27px] text-[#5a6f8d]">
                 Current status of all active environmental clearances
+              </p>
+              <p className="mt-2 inline-flex rounded-lg border border-slate-200 bg-[#f8faf9] px-3 py-1 text-[20px] font-semibold text-[#2f4f75]">
+                Total Applications: {totalApplicationsCount.toLocaleString()}
               </p>
             </div>
             <button

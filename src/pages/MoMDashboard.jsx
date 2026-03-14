@@ -16,74 +16,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
-
-const MOM_STORAGE_KEY = "ecoclear_mom_cases";
-
-const initialMomCases = [
-  {
-    id: "EC-2023-994",
-    meetingTitle: "North Basin Cleanup Review",
-    assignee: "Alex Rivera",
-    date: "Oct 24, 2023",
-    status: "Referred",
-    department: "Water Quality Dept.",
-    gist:
-      "Scrutiny approved. Focus on discharge control, containment zone monitoring, and compliance timeline alignment.",
-    minutes: {},
-  },
-  {
-    id: "EC-2023-991",
-    meetingTitle: "Carbon Credit Allocation Q4",
-    assignee: "Alex Rivera",
-    date: "Oct 23, 2023",
-    status: "Meeting Scheduled",
-    department: "Strategic Planning",
-    gist:
-      "Scrutiny approved with complete documents. Committee should validate allocation methodology and reporting boundaries.",
-    minutes: {},
-  },
-  {
-    id: "EC-2023-885",
-    meetingTitle: "Annual Sustainability Audit",
-    assignee: "Alex Rivera",
-    date: "Oct 22, 2023",
-    status: "Minutes Draft",
-    department: "Governance & Ethics",
-    gist:
-      "Committee discussion expected around variance notes and corrective action ownership.",
-    minutes: {
-      meetingTitle: "Annual Sustainability Audit",
-      meetingType: "Audit Review",
-      date: "2023-10-22",
-      time: "11:00",
-      location: "Main Committee Hall",
-      chairperson: "R. Nair",
-      minuteTaker: "Alex Rivera",
-      participants: "R. Nair\nA. Sharma\nD. Gupta",
-      agendaItems: "Audit scope confirmation\nVariance review\nCorrective timeline",
-      discussionSummary:
-        "Committee reviewed submitted audit documents and noted two unresolved variance records.",
-      decisionsTaken:
-        "Accept core audit report\nRequest variance closure note before final issue",
-      actionItems:
-        "Variance closure note - Quality Team - 2023-10-28 - Open",
-      risks: "Delay in closure may impact statutory reporting.",
-      nextSteps: "Collect closure note and circulate revised minutes.",
-      nextMeetingSchedule: "2023-10-30 10:30 AM",
-    },
-  },
-  {
-    id: "EC-2023-882",
-    meetingTitle: "Solar Farm Zoning Board",
-    assignee: "Alex Rivera",
-    date: "Oct 21, 2023",
-    status: "Finalized",
-    department: "External Relations",
-    gist:
-      "All required files validated by scrutiny. Zoning risk marked low with standard mitigation checklist.",
-    minutes: {},
-  },
-];
+import { supabase } from "../lib/supabaseClient";
 
 const sidebarItems = [
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard, route: "/mom-dashboard" },
@@ -100,6 +33,12 @@ const sidebarItems = [
     route: "/mom-dashboard/meeting-scheduled",
   },
   {
+    key: "pending-mom",
+    label: "Pending MoM",
+    icon: FilePenLine,
+    route: "/mom-dashboard/pending-mom",
+  },
+  {
     key: "finalized",
     label: "Finalized MoM",
     icon: CheckCircle2,
@@ -110,15 +49,23 @@ const sidebarItems = [
 function MoMDashboard() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { signOut } = useAuth();
-  const [cases, setCases] = useState(() => loadMomCases());
+  const { signOut, profile } = useAuth();
+  const [cases, setCases] = useState([]);
+  const [casesLoading, setCasesLoading] = useState(true);
+  const [casesError, setCasesError] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [isMutatingCase, setIsMutatingCase] = useState(false);
+
+  const assigneeName =
+    profile?.full_name?.trim() || profile?.username || "MoM Specialist";
 
   const currentView = useMemo(() => parseMomView(location.pathname), [location.pathname]);
   const referredCases = useMemo(() => cases.filter((item) => item.status === "Referred"), [cases]);
   const meetingScheduledCases = useMemo(
-    () => cases.filter((item) => item.status === "Meeting Scheduled" || item.status === "Minutes Draft"),
+    () => cases.filter((item) => item.status === "Meeting Scheduled"),
     [cases],
   );
+  const pendingMomCases = useMemo(() => cases.filter((item) => item.status === "Pending MoM"), [cases]);
   const finalizedCases = useMemo(() => cases.filter((item) => item.status === "Finalized"), [cases]);
   const editingCase = useMemo(
     () => cases.find((item) => item.id === currentView.editorId) ?? null,
@@ -129,19 +76,62 @@ function MoMDashboard() {
     [cases, currentView.gistId],
   );
 
-  useEffect(() => {
-    window.localStorage.setItem(MOM_STORAGE_KEY, JSON.stringify(cases));
-  }, [cases]);
+  const loadMomCases = async () => {
+    setCasesLoading(true);
+    setCasesError("");
+
+    const { data: applicationRows, error: applicationsError } = await supabase
+      .from("applications")
+      .select(
+        "id, application_code, project_name, sector_category, status, submitted_at, created_at",
+      )
+      .order("created_at", { ascending: false });
+
+    if (applicationsError) {
+      setCases([]);
+      setCasesError(applicationsError.message || "Failed to load MoM cases.");
+      setCasesLoading(false);
+      return;
+    }
+
+    const applicationList = (applicationRows ?? []).filter((application) =>
+      isMomRelevantStatus(application?.status),
+    );
+    if (applicationList.length === 0) {
+      setCases([]);
+      setCasesLoading(false);
+      return;
+    }
+
+    const applicationIds = applicationList.map((item) => item.id);
+    const { data: gistRows, error: gistError } = await supabase
+      .from("meeting_gists")
+      .select("application_id, gist_text, gist_json, provider, model_name, updated_at, created_at")
+      .in("application_id", applicationIds);
+
+    if (gistError) {
+      setCases([]);
+      setCasesError(gistError.message || "Failed to load meeting gist data.");
+      setCasesLoading(false);
+      return;
+    }
+
+    const gistByApplicationId = new Map(
+      (gistRows ?? []).map((row) => [row.application_id, row]),
+    );
+
+    const mappedCases = applicationList.map((application) => {
+      const gistRow = gistByApplicationId.get(application.id);
+      return mapApplicationToMomCase(application, gistRow, assigneeName);
+    });
+
+    setCases(mappedCases);
+    setCasesLoading(false);
+  };
 
   useEffect(() => {
-    const syncFromStorage = (event) => {
-      if (event.key !== MOM_STORAGE_KEY) return;
-      const next = loadMomCases();
-      setCases(next);
-    };
-    window.addEventListener("storage", syncFromStorage);
-    return () => window.removeEventListener("storage", syncFromStorage);
-  }, []);
+    loadMomCases();
+  }, [assigneeName]);
 
   const openMinutesEditor = (caseId) => {
     window.open(`/mom-dashboard/editor/${encodeURIComponent(caseId)}`, "_blank", "noopener,noreferrer");
@@ -151,42 +141,127 @@ function MoMDashboard() {
     window.open(`/mom-dashboard/gist/${encodeURIComponent(caseId)}`, "_blank", "noopener,noreferrer");
   };
 
-  const scheduleMeeting = (caseId) => {
-    setCases((current) =>
-      current.map((item) =>
-        item.id === caseId ? { ...item, status: "Meeting Scheduled" } : item,
-      ),
-    );
-    navigate("/mom-dashboard/meeting-scheduled");
+  const runCaseMutation = async (task, onSuccess) => {
+    setActionError("");
+    setIsMutatingCase(true);
+
+    try {
+      await task();
+      await loadMomCases();
+      onSuccess?.();
+    } catch (error) {
+      setActionError(error?.message || "Failed to update MoM workflow.");
+    } finally {
+      setIsMutatingCase(false);
+    }
   };
 
-  const saveDraftMinutes = (caseId, minutesPayload) => {
-    setCases((current) =>
-      current.map((item) =>
-        item.id === caseId
-          ? {
-              ...item,
-              status: "Minutes Draft",
-              minutes: minutesPayload,
-            }
-          : item,
-      ),
-    );
+  const scheduleMeeting = async (caseId) => {
+    const caseItem = cases.find((item) => item.id === caseId);
+    if (!caseItem?.dbId) return;
+
+    await runCaseMutation(async () => {
+      const { error } = await supabase
+        .from("applications")
+        .update({ status: "meeting_scheduled" })
+        .eq("id", caseItem.dbId);
+
+      if (error) {
+        throw new Error(error.message || "Failed to move case to Meeting Scheduled.");
+      }
+    }, () => navigate("/mom-dashboard/meeting-scheduled"));
   };
 
-  const finalizeMinutes = (caseId, minutesPayload) => {
-    setCases((current) =>
-      current.map((item) =>
-        item.id === caseId
-          ? {
-              ...item,
-              status: "Finalized",
-              minutes: minutesPayload,
-            }
-          : item,
-      ),
-    );
-    navigate("/mom-dashboard/finalized");
+  const markMeetingDone = async (caseId) => {
+    const caseItem = cases.find((item) => item.id === caseId);
+    if (!caseItem?.dbId) return;
+
+    await runCaseMutation(async () => {
+      const { error } = await supabase
+        .from("applications")
+        .update({ status: "minutes_draft" })
+        .eq("id", caseItem.dbId);
+
+      if (error) {
+        throw new Error(error.message || "Failed to move case to Pending MoM.");
+      }
+    }, () => navigate("/mom-dashboard/pending-mom"));
+  };
+
+  const saveDraftMinutes = async (caseId, minutesPayload) => {
+    const caseItem = cases.find((item) => item.id === caseId);
+    if (!caseItem?.dbId) return;
+
+    await runCaseMutation(async () => {
+      const gistJson = {
+        ...(caseItem.gistJson ?? {}),
+        minutes: minutesPayload,
+      };
+
+      const { error: gistError } = await supabase
+        .from("meeting_gists")
+        .upsert(
+          {
+            application_id: caseItem.dbId,
+            gist_text: caseItem.gist ?? "",
+            gist_json: gistJson,
+            provider: caseItem.provider || "local",
+            model_name: caseItem.modelName || "",
+          },
+          { onConflict: "application_id" },
+        );
+
+      if (gistError) {
+        throw new Error(gistError.message || "Failed to save draft minutes.");
+      }
+
+      const { error: applicationError } = await supabase
+        .from("applications")
+        .update({ status: "minutes_draft" })
+        .eq("id", caseItem.dbId);
+
+      if (applicationError) {
+        throw new Error(applicationError.message || "Failed to update application status.");
+      }
+    });
+  };
+
+  const finalizeMinutes = async (caseId, minutesPayload) => {
+    const caseItem = cases.find((item) => item.id === caseId);
+    if (!caseItem?.dbId) return;
+
+    await runCaseMutation(async () => {
+      const gistJson = {
+        ...(caseItem.gistJson ?? {}),
+        minutes: minutesPayload,
+      };
+
+      const { error: gistError } = await supabase
+        .from("meeting_gists")
+        .upsert(
+          {
+            application_id: caseItem.dbId,
+            gist_text: caseItem.gist ?? "",
+            gist_json: gistJson,
+            provider: caseItem.provider || "local",
+            model_name: caseItem.modelName || "",
+          },
+          { onConflict: "application_id" },
+        );
+
+      if (gistError) {
+        throw new Error(gistError.message || "Failed to save finalized minutes.");
+      }
+
+      const { error: applicationError } = await supabase
+        .from("applications")
+        .update({ status: "finalized" })
+        .eq("id", caseItem.dbId);
+
+      if (applicationError) {
+        throw new Error(applicationError.message || "Failed to finalize application.");
+      }
+    }, () => navigate("/mom-dashboard/finalized"));
   };
 
   const exportMinutesRecord = (caseId, format) => {
@@ -248,11 +323,28 @@ function MoMDashboard() {
     URL.revokeObjectURL(url);
   };
 
-  const saveGistChanges = (caseId, gistText) => {
-    setCases((current) =>
-      current.map((item) => (item.id === caseId ? { ...item, gist: gistText.trim() } : item)),
-    );
-    navigate("/mom-dashboard/referred-cases");
+  const saveGistChanges = async (caseId, gistText) => {
+    const caseItem = cases.find((item) => item.id === caseId);
+    if (!caseItem?.dbId) return;
+
+    await runCaseMutation(async () => {
+      const { error } = await supabase
+        .from("meeting_gists")
+        .upsert(
+          {
+            application_id: caseItem.dbId,
+            gist_text: gistText.trim(),
+            gist_json: caseItem.gistJson ?? {},
+            provider: caseItem.provider || "local",
+            model_name: caseItem.modelName || "",
+          },
+          { onConflict: "application_id" },
+        );
+
+      if (error) {
+        throw new Error(error.message || "Failed to save gist changes.");
+      }
+    }, () => navigate("/mom-dashboard/referred-cases"));
   };
 
   const handleLogout = async () => {
@@ -267,7 +359,7 @@ function MoMDashboard() {
 
   const activeSidebarKey =
     currentView.type === "editor"
-      ? "meeting-scheduled"
+      ? "pending-mom"
       : currentView.type === "gist-editor"
         ? "referred-cases"
         : currentView.type;
@@ -314,7 +406,7 @@ function MoMDashboard() {
             <div className="flex items-center gap-3">
               <div className="h-11 w-11 rounded-full bg-slate-200" />
               <div>
-                <p className="text-[28px] font-semibold text-[#1f3048]">Alex Rivera</p>
+                <p className="text-[28px] font-semibold text-[#1f3048]">{assigneeName}</p>
                 <p className="text-lg text-slate-500">MoM Specialist</p>
               </div>
             </div>
@@ -341,7 +433,7 @@ function MoMDashboard() {
               </button>
               <span className="mx-1 h-8 w-px bg-slate-200" />
               <div className="hidden text-right sm:block">
-                <p className="text-[19px] font-semibold text-[#1f3048]">Alex Rivera</p>
+                <p className="text-[19px] font-semibold text-[#1f3048]">{assigneeName}</p>
                 <p className="text-sm text-slate-500">MoM Specialist</p>
               </div>
               <div className="h-10 w-10 rounded-full bg-slate-200" />
@@ -357,14 +449,24 @@ function MoMDashboard() {
           </header>
 
           <div className="space-y-6 p-6 lg:p-8">
+            {actionError ? (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-[18px] text-rose-700">
+                {actionError}
+              </div>
+            ) : null}
+
             {currentView.type === "dashboard" ? (
               <MomDashboardView
+                casesError={casesError}
+                casesLoading={casesLoading}
                 finalizedCount={finalizedCases.length}
+                isActionBusy={isMutatingCase}
                 meetingCount={meetingScheduledCases.length}
                 onEditGist={openGistEditor}
                 onEditMinutes={openMinutesEditor}
                 onExportGist={exportGistRecord}
                 onExportMinutes={exportMinutesRecord}
+                onMeetingDone={markMeetingDone}
                 onScheduleMeeting={scheduleMeeting}
                 recentCases={cases.slice(0, 6)}
                 referredCount={referredCases.length}
@@ -373,11 +475,15 @@ function MoMDashboard() {
 
             {currentView.type === "referred-cases" ? (
               <MomCasesPage
+                casesError={casesError}
+                casesLoading={casesLoading}
                 description="Cases approved by scrutiny and referred with AI-generated gist."
+                isActionBusy={isMutatingCase}
                 onEditGist={openGistEditor}
                 onEditMinutes={openMinutesEditor}
                 onExportGist={exportGistRecord}
                 onExportMinutes={exportMinutesRecord}
+                onMeetingDone={markMeetingDone}
                 onScheduleMeeting={scheduleMeeting}
                 rows={referredCases}
                 title="Referred Cases"
@@ -386,24 +492,49 @@ function MoMDashboard() {
 
             {currentView.type === "meeting-scheduled" ? (
               <MomCasesPage
+                casesError={casesError}
+                casesLoading={casesLoading}
                 description="Meetings are scheduled; MoM team can edit formal minutes after completion."
+                isActionBusy={isMutatingCase}
                 onEditGist={openGistEditor}
                 onEditMinutes={openMinutesEditor}
                 onExportGist={exportGistRecord}
                 onExportMinutes={exportMinutesRecord}
+                onMeetingDone={markMeetingDone}
                 onScheduleMeeting={scheduleMeeting}
                 rows={meetingScheduledCases}
                 title="Meeting Scheduled"
               />
             ) : null}
 
-            {currentView.type === "finalized" ? (
+            {currentView.type === "pending-mom" ? (
               <MomCasesPage
-                description="Finalized minutes are the last stage in this workflow."
+                casesError={casesError}
+                casesLoading={casesLoading}
+                description="Meeting is completed. MoM team can now edit and finalize formal minutes."
+                isActionBusy={isMutatingCase}
                 onEditGist={openGistEditor}
                 onEditMinutes={openMinutesEditor}
                 onExportGist={exportGistRecord}
                 onExportMinutes={exportMinutesRecord}
+                onMeetingDone={markMeetingDone}
+                onScheduleMeeting={scheduleMeeting}
+                rows={pendingMomCases}
+                title="Pending MoM"
+              />
+            ) : null}
+
+            {currentView.type === "finalized" ? (
+              <MomCasesPage
+                casesError={casesError}
+                casesLoading={casesLoading}
+                description="Finalized minutes are the last stage in this workflow."
+                isActionBusy={isMutatingCase}
+                onEditGist={openGistEditor}
+                onEditMinutes={openMinutesEditor}
+                onExportGist={exportGistRecord}
+                onExportMinutes={exportMinutesRecord}
+                onMeetingDone={markMeetingDone}
                 onScheduleMeeting={scheduleMeeting}
                 rows={finalizedCases}
                 title="Finalized MoM"
@@ -413,7 +544,9 @@ function MoMDashboard() {
             {currentView.type === "editor" ? (
               <MinutesEditorPage
                 caseItem={editingCase}
-                onBack={() => navigate("/mom-dashboard/meeting-scheduled")}
+                isSaving={isMutatingCase}
+                loading={casesLoading}
+                onBack={() => navigate("/mom-dashboard/pending-mom")}
                 onFinalize={finalizeMinutes}
                 onSaveDraft={saveDraftMinutes}
               />
@@ -422,6 +555,8 @@ function MoMDashboard() {
             {currentView.type === "gist-editor" ? (
               <GistEditorPage
                 caseItem={gistEditingCase}
+                isSaving={isMutatingCase}
+                loading={casesLoading}
                 onBack={() => navigate("/mom-dashboard/referred-cases")}
                 onSave={saveGistChanges}
               />
@@ -434,10 +569,14 @@ function MoMDashboard() {
 }
 
 function MomDashboardView({
+  casesLoading,
+  casesError,
   referredCount,
   meetingCount,
   finalizedCount,
   recentCases,
+  isActionBusy,
+  onMeetingDone,
   onScheduleMeeting,
   onEditGist,
   onEditMinutes,
@@ -497,10 +636,14 @@ function MomDashboardView({
           </button>
         </div>
         <MomCasesTable
+          casesError={casesError}
+          casesLoading={casesLoading}
+          isActionBusy={isActionBusy}
           onEditGist={onEditGist}
           onEditMinutes={onEditMinutes}
           onExportGist={onExportGist}
           onExportMinutes={onExportMinutes}
+          onMeetingDone={onMeetingDone}
           onScheduleMeeting={onScheduleMeeting}
           rows={recentCases}
         />
@@ -531,6 +674,10 @@ function MomCasesPage({
   title,
   description,
   rows,
+  casesLoading,
+  casesError,
+  isActionBusy,
+  onMeetingDone,
   onScheduleMeeting,
   onEditGist,
   onEditMinutes,
@@ -549,10 +696,14 @@ function MomCasesPage({
           <h2 className="text-[34px] font-semibold text-[#111827]">{title} List</h2>
         </div>
         <MomCasesTable
+          casesError={casesError}
+          casesLoading={casesLoading}
+          isActionBusy={isActionBusy}
           onEditGist={onEditGist}
           onEditMinutes={onEditMinutes}
           onExportGist={onExportGist}
           onExportMinutes={onExportMinutes}
+          onMeetingDone={onMeetingDone}
           onScheduleMeeting={onScheduleMeeting}
           rows={rows}
         />
@@ -563,6 +714,10 @@ function MomCasesPage({
 
 function MomCasesTable({
   rows,
+  casesLoading,
+  casesError,
+  isActionBusy,
+  onMeetingDone,
   onScheduleMeeting,
   onEditGist,
   onEditMinutes,
@@ -595,14 +750,29 @@ function MomCasesTable({
           </tr>
         </thead>
         <tbody>
-          {rows.length === 0 ? (
+          {casesLoading ? (
+            <tr>
+              <td className="px-5 py-8 text-[21px] text-[#5c6f89]" colSpan={6}>
+                Loading MoM cases from database...
+              </td>
+            </tr>
+          ) : null}
+          {!casesLoading && casesError ? (
+            <tr>
+              <td className="px-5 py-8 text-[21px] font-medium text-rose-700" colSpan={6}>
+                {casesError}
+              </td>
+            </tr>
+          ) : null}
+          {!casesLoading && !casesError && rows.length === 0 ? (
             <tr>
               <td className="px-5 py-8 text-[21px] text-[#5c6f89]" colSpan={6}>
                 No cases in this stage.
               </td>
             </tr>
           ) : null}
-          {rows.map((row) => (
+          {!casesLoading && !casesError
+            ? rows.map((row) => (
             <tr className="border-b border-slate-100 last:border-b-0" key={row.id}>
               <td className="px-5 py-3">
                 <span className="rounded-md bg-[#e8f2eb] px-2.5 py-1 text-[20px] font-semibold text-[#124734]">
@@ -627,14 +797,16 @@ function MomCasesTable({
                 {row.status === "Referred" ? (
                   <div className="flex flex-wrap items-center gap-2">
                     <button
-                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[20px] font-semibold text-[#124734] hover:bg-[#f2f8f4]"
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[20px] font-semibold text-[#124734] hover:bg-[#f2f8f4] disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={isActionBusy}
                       onClick={() => onEditGist(row.id)}
                       type="button"
                     >
                       View / Edit Gist
                     </button>
                     <button
-                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[20px] font-semibold text-[#124734] hover:bg-[#f2f8f4]"
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[20px] font-semibold text-[#124734] hover:bg-[#f2f8f4] disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={isActionBusy}
                       onClick={() => onScheduleMeeting(row.id)}
                       type="button"
                     >
@@ -644,43 +816,54 @@ function MomCasesTable({
                   </div>
                 ) : null}
 
-                {row.status === "Meeting Scheduled" || row.status === "Minutes Draft" ? (
+                {row.status === "Meeting Scheduled" ? (
                   <div className="flex flex-wrap items-center gap-2">
-                    {row.status === "Meeting Scheduled" ? (
-                      <details className="relative inline-block text-left">
-                        <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[18px] font-semibold text-[#124734] hover:bg-[#f2f8f4]">
-                          <Download className="h-4 w-4" />
-                          Download Gist
-                        </summary>
-                        <div className="absolute right-0 z-10 mt-2 min-w-[190px] rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
-                          <button
-                            className="block w-full rounded-md px-3 py-2 text-left text-sm text-[#1f3048] hover:bg-slate-50"
-                            onClick={() => onExportGist(row.id, "word")}
-                            type="button"
-                          >
-                            Export as Word
-                          </button>
-                          <button
-                            className="block w-full rounded-md px-3 py-2 text-left text-sm text-[#1f3048] hover:bg-slate-50"
-                            onClick={() => onExportGist(row.id, "pdf")}
-                            type="button"
-                          >
-                            Export as PDF
-                          </button>
-                        </div>
-                      </details>
-                    ) : null}
+                    <details className="relative inline-block text-left">
+                      <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[18px] font-semibold text-[#124734] hover:bg-[#f2f8f4]">
+                        <Download className="h-4 w-4" />
+                        Download Gist
+                      </summary>
+                      <div className="absolute right-0 z-10 mt-2 min-w-[190px] rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+                        <button
+                          className="block w-full rounded-md px-3 py-2 text-left text-sm text-[#1f3048] hover:bg-slate-50"
+                          onClick={() => onExportGist(row.id, "word")}
+                          type="button"
+                        >
+                          Export as Word
+                        </button>
+                        <button
+                          className="block w-full rounded-md px-3 py-2 text-left text-sm text-[#1f3048] hover:bg-slate-50"
+                          onClick={() => onExportGist(row.id, "pdf")}
+                          type="button"
+                        >
+                          Export as PDF
+                        </button>
+                      </div>
+                    </details>
 
-                    {row.status === "Minutes Draft" ? (
-                      <button
-                        className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[20px] font-semibold text-[#124734] hover:bg-[#f2f8f4]"
-                        onClick={() => onEditMinutes(row.id)}
-                        type="button"
-                      >
-                        Edit Minutes
-                        <FilePenLine className="h-4 w-4" />
-                      </button>
-                    ) : null}
+                    <button
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[20px] font-semibold text-[#124734] hover:bg-[#f2f8f4] disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={isActionBusy}
+                      onClick={() => onMeetingDone(row.id)}
+                      type="button"
+                    >
+                      Meeting Done
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
+                  </div>
+                ) : null}
+
+                {row.status === "Pending MoM" ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[20px] font-semibold text-[#124734] hover:bg-[#f2f8f4] disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={isActionBusy}
+                      onClick={() => onEditMinutes(row.id)}
+                      type="button"
+                    >
+                      Edit Minutes
+                      <FilePenLine className="h-4 w-4" />
+                    </button>
                   </div>
                 ) : null}
 
@@ -718,19 +901,28 @@ function MomCasesTable({
                 ) : null}
               </td>
             </tr>
-          ))}
+              ))
+            : null}
         </tbody>
       </table>
     </div>
   );
 }
 
-function GistEditorPage({ caseItem, onBack, onSave }) {
+function GistEditorPage({ caseItem, loading, isSaving, onBack, onSave }) {
   const [gistText, setGistText] = useState(caseItem?.gist ?? "");
 
   useEffect(() => {
     setGistText(caseItem?.gist ?? "");
   }, [caseItem]);
+
+  if (loading) {
+    return (
+      <section className="space-y-4">
+        <h1 className="text-5xl font-semibold tracking-tight text-[#111f3b]">Loading Gist...</h1>
+      </section>
+    );
+  }
 
   if (!caseItem) {
     return (
@@ -786,7 +978,8 @@ function GistEditorPage({ caseItem, onBack, onSave }) {
 
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <button
-            className="inline-flex items-center gap-2 rounded-xl bg-[#124734] px-4 py-2.5 text-[20px] font-semibold text-white shadow-[0_12px_24px_rgba(18,71,52,0.2)] hover:bg-[#0f3a2b]"
+            className="inline-flex items-center gap-2 rounded-xl bg-[#124734] px-4 py-2.5 text-[20px] font-semibold text-white shadow-[0_12px_24px_rgba(18,71,52,0.2)] hover:bg-[#0f3a2b] disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={isSaving}
             onClick={() => onSave(caseItem.id, gistText)}
             type="button"
           >
@@ -798,12 +991,22 @@ function GistEditorPage({ caseItem, onBack, onSave }) {
   );
 }
 
-function MinutesEditorPage({ caseItem, onBack, onSaveDraft, onFinalize }) {
+function MinutesEditorPage({ caseItem, loading, isSaving, onBack, onSaveDraft, onFinalize }) {
   const [form, setForm] = useState(() => buildTemplateState(caseItem));
 
   useEffect(() => {
     setForm(buildTemplateState(caseItem));
   }, [caseItem]);
+
+  if (loading) {
+    return (
+      <section className="space-y-4">
+        <h1 className="text-5xl font-semibold tracking-tight text-[#111f3b]">
+          Loading Minutes Editor...
+        </h1>
+      </section>
+    );
+  }
 
   if (!caseItem) {
     return (
@@ -881,14 +1084,16 @@ function MinutesEditorPage({ caseItem, onBack, onSaveDraft, onFinalize }) {
 
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <button
-            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-[20px] font-semibold text-[#124734] hover:bg-[#f2f8f4]"
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-[20px] font-semibold text-[#124734] hover:bg-[#f2f8f4] disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={isSaving}
             onClick={() => onSaveDraft(caseItem.id, form)}
             type="button"
           >
             Save Draft
           </button>
           <button
-            className="inline-flex items-center gap-2 rounded-xl bg-[#124734] px-4 py-2.5 text-[20px] font-semibold text-white shadow-[0_12px_24px_rgba(18,71,52,0.2)] hover:bg-[#0f3a2b]"
+            className="inline-flex items-center gap-2 rounded-xl bg-[#124734] px-4 py-2.5 text-[20px] font-semibold text-white shadow-[0_12px_24px_rgba(18,71,52,0.2)] hover:bg-[#0f3a2b] disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={isSaving}
             onClick={() => onFinalize(caseItem.id, form)}
             type="button"
           >
@@ -946,7 +1151,7 @@ function StatusBadge({ status }) {
   const styles = {
     Referred: "bg-amber-100 text-amber-700",
     "Meeting Scheduled": "bg-blue-100 text-blue-700",
-    "Minutes Draft": "bg-violet-100 text-violet-700",
+    "Pending MoM": "bg-violet-100 text-violet-700",
     Finalized: "bg-emerald-100 text-emerald-700",
   };
 
@@ -974,6 +1179,9 @@ function parseMomView(pathname) {
   }
   if (normalized === "/mom-dashboard/meeting-scheduled") {
     return { type: "meeting-scheduled" };
+  }
+  if (normalized === "/mom-dashboard/pending-mom") {
+    return { type: "pending-mom" };
   }
   if (normalized === "/mom-dashboard/finalized") {
     return { type: "finalized" };
@@ -1022,16 +1230,102 @@ function buildTemplateState(caseItem) {
   };
 }
 
-function loadMomCases() {
-  try {
-    const raw = window.localStorage.getItem(MOM_STORAGE_KEY);
-    if (!raw) return initialMomCases;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return initialMomCases;
-    return parsed;
-  } catch {
-    return initialMomCases;
+function mapApplicationToMomCase(application, gistRow, assigneeName) {
+  const normalizedStatus = normalizeMomStatus(application?.status);
+  const gistJson = asObject(gistRow?.gist_json);
+  const minutes = asObject(gistJson?.minutes);
+
+  return {
+    dbId: application?.id || "",
+    id: application?.application_code || application?.id || "N/A",
+    meetingTitle:
+      normalizeText(gistJson?.meeting_title) ||
+      normalizeText(gistJson?.meetingTitle) ||
+      normalizeText(application?.project_name) ||
+      "Untitled Meeting",
+    department: normalizeText(application?.sector_category) || "General",
+    date: toDisplayDate(application?.submitted_at || application?.created_at),
+    status: toMomStatusLabel(normalizedStatus),
+    dbStatus: normalizedStatus,
+    assignee: assigneeName,
+    gist: buildGistText(gistRow, gistJson, application),
+    gistJson,
+    provider: normalizeText(gistRow?.provider) || "",
+    modelName: normalizeText(gistRow?.model_name) || "",
+    minutes,
+  };
+}
+
+function buildGistText(gistRow, gistJson, application) {
+  const directText = normalizeText(gistRow?.gist_text);
+  if (directText) return directText;
+
+  const fallbackSummary =
+    normalizeText(gistJson?.discussion_summary) ||
+    normalizeText(gistJson?.summary) ||
+    normalizeText(gistJson?.agenda_summary);
+
+  if (fallbackSummary) return fallbackSummary;
+
+  const projectName = normalizeText(application?.project_name) || "the referred case";
+  return `AI gist is not yet available for ${projectName}.`;
+}
+
+function toDisplayDate(dateValue) {
+  if (!dateValue) return "Not Available";
+  const parsedDate = new Date(dateValue);
+  if (Number.isNaN(parsedDate.getTime())) return "Not Available";
+  return parsedDate.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function normalizeMomStatus(statusValue) {
+  const value = String(statusValue ?? "")
+    .trim()
+    .toLowerCase();
+
+  if (value === "meeting_scheduled") return "meeting_scheduled";
+  if (value === "minutes_draft") return "minutes_draft";
+  if (value === "finalized") return "finalized";
+  if (value === "referred" || value === "mom_generated") return value;
+  return "referred";
+}
+
+function isMomRelevantStatus(statusValue) {
+  const value = String(statusValue ?? "")
+    .trim()
+    .toLowerCase();
+
+  return (
+    value === "referred" ||
+    value === "mom_generated" ||
+    value === "meeting_scheduled" ||
+    value === "minutes_draft" ||
+    value === "finalized"
+  );
+}
+
+function toMomStatusLabel(status) {
+  if (status === "meeting_scheduled") return "Meeting Scheduled";
+  if (status === "minutes_draft") return "Pending MoM";
+  if (status === "finalized") return "Finalized";
+  return "Referred";
+}
+
+function normalizeText(value) {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : "";
+}
+
+function asObject(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value;
   }
+  return {};
 }
 
 export default MoMDashboard;
