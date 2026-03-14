@@ -239,6 +239,9 @@ function AdminDashboard() {
   const [sectorForm, setSectorForm] = useState({
     name: "",
     parametersText: "",
+    documentsRequiredText: "",
+    affidavitsText: "",
+    edsText: "",
   });
   const [sectorDeleteTarget, setSectorDeleteTarget] = useState(null);
 
@@ -350,11 +353,20 @@ function AdminDashboard() {
       setSectorForm({
         name: selectedSector.name,
         parametersText: selectedSector.parameters.join("\n"),
+        documentsRequiredText: selectedSector.documentsRequired.join("\n"),
+        affidavitsText: selectedSector.affidavits.join("\n"),
+        edsText: selectedSector.eds.join("\n"),
       });
     }
 
     if (sectorMode === "add") {
-      setSectorForm({ name: "", parametersText: "" });
+      setSectorForm({
+        name: "",
+        parametersText: "",
+        documentsRequiredText: "",
+        affidavitsText: "",
+        edsText: "",
+      });
     }
   }, [sectorMode, selectedSector]);
 
@@ -397,7 +409,7 @@ function AdminDashboard() {
 
     const { data, error } = await supabase
       .from("sectors")
-      .select("id, name, parameters, created_at")
+      .select("id, name, parameters, documents_required, affidavits, eds, created_at")
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -412,6 +424,11 @@ function AdminDashboard() {
         id: sector.id,
         name: sector.name,
         parameters: Array.isArray(sector.parameters) ? sector.parameters : [],
+        documentsRequired: Array.isArray(sector.documents_required)
+          ? sector.documents_required
+          : [],
+        affidavits: Array.isArray(sector.affidavits) ? sector.affidavits : [],
+        eds: Array.isArray(sector.eds) ? sector.eds : [],
       })),
     );
     setSectorsLoading(false);
@@ -616,7 +633,13 @@ function AdminDashboard() {
   const openAddSector = () => {
     setSectorMode("add");
     setSelectedSectorId(null);
-    setSectorForm({ name: "", parametersText: "" });
+    setSectorForm({
+      name: "",
+      parametersText: "",
+      documentsRequiredText: "",
+      affidavitsText: "",
+      edsText: "",
+    });
     navigate("/admin-dashboard/sector-parameters");
   };
 
@@ -632,9 +655,29 @@ function AdminDashboard() {
       .split("\n")
       .map((line) => line.trim().replace(/^[-*]\s*/, ""))
       .filter(Boolean);
+    const nextDocumentsRequired = sectorForm.documentsRequiredText
+      .split("\n")
+      .map((line) => line.trim().replace(/^[-*]\s*/, ""))
+      .filter(Boolean);
+    const nextAffidavits = sectorForm.affidavitsText
+      .split("\n")
+      .map((line) => line.trim().replace(/^[-*]\s*/, ""))
+      .filter(Boolean);
+    const nextEds = sectorForm.edsText
+      .split("\n")
+      .map((line) => line.trim().replace(/^[-*]\s*/, ""))
+      .filter(Boolean);
 
-    if (!nextName || nextParameters.length === 0) {
-      setToastMessage("Please provide sector name and at least one parameter.");
+    if (
+      !nextName ||
+      nextParameters.length === 0 ||
+      nextDocumentsRequired.length === 0 ||
+      nextAffidavits.length === 0 ||
+      nextEds.length === 0
+    ) {
+      setToastMessage(
+        "Please provide sector name and at least one line each for Parameters, Documents Required, Affidavits, and EDS.",
+      );
       return;
     }
 
@@ -643,7 +686,13 @@ function AdminDashboard() {
     if (sectorMode === "add") {
       const { data, error } = await supabase
         .from("sectors")
-        .insert({ name: nextName, parameters: nextParameters })
+        .insert({
+          name: nextName,
+          parameters: nextParameters,
+          documents_required: nextDocumentsRequired,
+          affidavits: nextAffidavits,
+          eds: nextEds,
+        })
         .select("id")
         .single();
 
@@ -659,7 +708,13 @@ function AdminDashboard() {
     } else if (selectedSectorId != null) {
       const { error } = await supabase
         .from("sectors")
-        .update({ name: nextName, parameters: nextParameters })
+        .update({
+          name: nextName,
+          parameters: nextParameters,
+          documents_required: nextDocumentsRequired,
+          affidavits: nextAffidavits,
+          eds: nextEds,
+        })
         .eq("id", selectedSectorId);
 
       if (error) {
@@ -1734,6 +1789,57 @@ function SectorParametersView({
               value={sectorForm.parametersText}
             />
           </label>
+
+          <label className="space-y-2">
+            <span className="block text-[22px] font-semibold text-[#304763]">
+              Documents Required (one per line)
+            </span>
+            <textarea
+              className="min-h-[130px] w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-[22px] text-[#1f3048] outline-none focus:border-[#124734] focus:ring-2 focus:ring-[#124734]/10"
+              onChange={(event) =>
+                setSectorForm((current) => ({
+                  ...current,
+                  documentsRequiredText: event.target.value,
+                }))
+              }
+              placeholder={"Site map\nFeasibility report\nEnvironmental impact report"}
+              value={sectorForm.documentsRequiredText}
+            />
+          </label>
+
+          <label className="space-y-2">
+            <span className="block text-[22px] font-semibold text-[#304763]">
+              Affidavits (one per line)
+            </span>
+            <textarea
+              className="min-h-[120px] w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-[22px] text-[#1f3048] outline-none focus:border-[#124734] focus:ring-2 focus:ring-[#124734]/10"
+              onChange={(event) =>
+                setSectorForm((current) => ({
+                  ...current,
+                  affidavitsText: event.target.value,
+                }))
+              }
+              placeholder={"Land ownership affidavit\nPollution compliance affidavit"}
+              value={sectorForm.affidavitsText}
+            />
+          </label>
+
+          <label className="space-y-2">
+            <span className="block text-[22px] font-semibold text-[#304763]">
+              EDS - Essential Document Sought (one per line)
+            </span>
+            <textarea
+              className="min-h-[120px] w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-[22px] text-[#1f3048] outline-none focus:border-[#124734] focus:ring-2 focus:ring-[#124734]/10"
+              onChange={(event) =>
+                setSectorForm((current) => ({
+                  ...current,
+                  edsText: event.target.value,
+                }))
+              }
+              placeholder={"Latest compliance audit\nRevised technical annexure"}
+              value={sectorForm.edsText}
+            />
+          </label>
         </div>
 
         {mode === "edit" && selectedSector ? (
@@ -1748,6 +1854,26 @@ function SectorParametersView({
             {selectedSector.parameters.map((parameter) => (
               <p className="text-[21px] text-[#5c6f89]" key={parameter}>
                 - {parameter}
+              </p>
+            ))}
+            <p className="mt-2 text-[22px] text-[#415a79]">Documents Required:</p>
+            {selectedSector.documentsRequired.map((entry) => (
+              <p className="text-[21px] text-[#5c6f89]" key={`doc-${entry}`}>
+                - {entry}
+              </p>
+            ))}
+            <p className="mt-2 text-[22px] text-[#415a79]">Affidavits:</p>
+            {selectedSector.affidavits.map((entry) => (
+              <p className="text-[21px] text-[#5c6f89]" key={`aff-${entry}`}>
+                - {entry}
+              </p>
+            ))}
+            <p className="mt-2 text-[22px] text-[#415a79]">
+              EDS (Essential Document Sought):
+            </p>
+            {selectedSector.eds.map((entry) => (
+              <p className="text-[21px] text-[#5c6f89]" key={`eds-${entry}`}>
+                - {entry}
               </p>
             ))}
           </div>

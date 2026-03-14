@@ -55,6 +55,7 @@ function ScrutinyDashboard() {
   const [reviewNote, setReviewNote] = useState("");
   const [approvalProgressMessage, setApprovalProgressMessage] = useState("");
   const [approvalErrorMessage, setApprovalErrorMessage] = useState("");
+  const [edsChecksByCase, setEdsChecksByCase] = useState({});
 
   const currentView = useMemo(() => getViewFromPath(location.pathname), [location.pathname]);
 
@@ -74,8 +75,17 @@ function ScrutinyDashboard() {
     [cases],
   );
   const highPriorityCases = useMemo(
-    () => underScrutinyCases.filter((item) => item.priority === "High"),
-    [underScrutinyCases],
+    () =>
+      [...cases]
+        .filter((item) =>
+          ["submitted", "under_scrutiny", "deficiency_raised"].includes(item.dbStatus),
+        )
+        .sort((left, right) => {
+          const byUrgency = (right.urgencyScore ?? 0) - (left.urgencyScore ?? 0);
+          if (byUrgency !== 0) return byUrgency;
+          return (right.createdAtTs ?? 0) - (left.createdAtTs ?? 0);
+        }),
+    [cases],
   );
 
   const selectedCase = useMemo(
@@ -98,21 +108,38 @@ function ScrutinyDashboard() {
     setCasesLoading(true);
     setCasesError("");
 
-    const { data: applicationRows, error: applicationsError } = await supabase
-      .from("applications")
-      .select(
-        "id, application_code, proponent_id, project_name, sector_category, status, submitted_at, created_at, deficiency_message, document_count",
-      )
+    const baseApplicationSelect =
+      "id, application_code, proponent_id, project_name, sector_category, status, submitted_at, created_at, deficiency_message, document_count, urgency_score";
+    let applications = [];
+
+    const urgencyViewResult = await supabase
+      .from("applications_with_urgency")
+      .select(baseApplicationSelect)
       .order("created_at", { ascending: false });
 
-    if (applicationsError) {
-      setCases([]);
-      setCasesError(applicationsError.message || "Failed to load applications.");
-      setCasesLoading(false);
-      return;
+    if (urgencyViewResult.error) {
+      const fallbackResult = await supabase
+        .from("applications")
+        .select(
+          "id, application_code, proponent_id, project_name, sector_category, status, submitted_at, created_at, deficiency_message, document_count",
+        )
+        .order("created_at", { ascending: false });
+
+      if (fallbackResult.error) {
+        setCases([]);
+        setCasesError(fallbackResult.error.message || "Failed to load applications.");
+        setCasesLoading(false);
+        return;
+      }
+
+      applications = (fallbackResult.data ?? []).map((item) => ({
+        ...item,
+        urgency_score: 0,
+      }));
+    } else {
+      applications = urgencyViewResult.data ?? [];
     }
 
-    const applications = applicationRows ?? [];
     if (applications.length === 0) {
       setCases([]);
       setCasesLoading(false);
@@ -122,7 +149,7 @@ function ScrutinyDashboard() {
     const proponentIds = [...new Set(applications.map((item) => item.proponent_id).filter(Boolean))];
     const applicationIds = applications.map((item) => item.id);
 
-    const [usersResult, docsResult] = await Promise.all([
+    const [usersResult, docsResult, sectorsResult] = await Promise.all([
       supabase
         .from("users")
         .select("id, full_name, username")
@@ -131,6 +158,7 @@ function ScrutinyDashboard() {
         .from("application_documents")
         .select("id, application_id, file_name, storage_path")
         .in("application_id", applicationIds),
+      supabase.from("sectors").select("name, eds"),
     ]);
 
     if (usersResult.error) {
@@ -147,7 +175,22 @@ function ScrutinyDashboard() {
       return;
     }
 
+    if (sectorsResult.error) {
+      setCases([]);
+      setCasesError(sectorsResult.error.message || "Failed to load sector EDS configuration.");
+      setCasesLoading(false);
+      return;
+    }
+
     const usersById = new Map((usersResult.data ?? []).map((item) => [item.id, item]));
+    const sectorsByName = new Map(
+      (sectorsResult.data ?? []).map((sector) => [
+        normalizeSectorKey(sector?.name),
+        Array.isArray(sector?.eds)
+          ? sector.eds.filter((item) => typeof item === "string" && item.trim())
+          : [],
+      ]),
+    );
     const documentsByApplicationId = new Map();
 
     for (const doc of docsResult.data ?? []) {
@@ -165,6 +208,8 @@ function ScrutinyDashboard() {
       const displayName = applicant?.full_name?.trim() || applicant?.username || "Unknown Proponent";
       const uiStatus = getScrutinyStatusLabel(item.status);
       const docs = documentsByApplicationId.get(item.id) ?? [];
+      const edsChecklist =
+        sectorsByName.get(normalizeSectorKey(item.sector_category)) ?? [];
 
       return {
         dbId: item.id,
@@ -176,6 +221,9 @@ function ScrutinyDashboard() {
         status: uiStatus,
         dbStatus: item.status,
         priority: getCasePriority(item, docs),
+        urgencyScore: Number(item.urgency_score ?? 0),
+        createdAtTs: new Date(item.created_at || Date.now()).getTime(),
+        eds: edsChecklist,
         notes:
           item.deficiency_message ||
           (uiStatus === "Referred to MoM"
@@ -192,6 +240,22 @@ function ScrutinyDashboard() {
   useEffect(() => {
     loadScrutinyCases();
   }, []);
+
+  const openDocumentInNewWindow = async (documentItem) => {
+    if (!documentItem?.storagePath) return;
+
+    const { data, error } = await supabase.storage
+      .from(APPLICATION_DOCUMENT_BUCKET)
+      .createSignedUrl(documentItem.storagePath, 60 * 30);
+
+    if (error || !data?.signedUrl) {
+      // eslint-disable-next-line no-console
+      console.error("Failed to open document preview", error);
+      return;
+    }
+
+    window.open(data.signedUrl, "_blank", "noopener,noreferrer");
+  };
 
   const downloadCaseDocument = async (caseId, documentItem) => {
     if (!documentItem?.storagePath) return;
@@ -214,6 +278,39 @@ function ScrutinyDashboard() {
     anchor.click();
     document.body.removeChild(anchor);
     URL.revokeObjectURL(url);
+  };
+
+  useEffect(() => {
+    if (currentView.type !== "review" || !selectedCase) return;
+
+    const caseKey = selectedCase.dbId || selectedCase.id;
+    const edsItems = Array.isArray(selectedCase.eds) ? selectedCase.eds : [];
+
+    setEdsChecksByCase((current) => {
+      const existing = current[caseKey] ?? {};
+      const nextChecks = {};
+      edsItems.forEach((entry) => {
+        nextChecks[entry] = Boolean(existing[entry]);
+      });
+      return { ...current, [caseKey]: nextChecks };
+    });
+  }, [currentView.type, selectedCase]);
+
+  const toggleEdsCheck = (caseKey, edsItem) => (event) => {
+    const checked = event.target.checked;
+    setEdsChecksByCase((current) => ({
+      ...current,
+      [caseKey]: {
+        ...(current[caseKey] ?? {}),
+        [edsItem]: checked,
+      },
+    }));
+  };
+
+  const getUncheckedEds = (caseItem) => {
+    const caseKey = caseItem.dbId || caseItem.id;
+    const checks = edsChecksByCase[caseKey] ?? {};
+    return (caseItem.eds ?? []).filter((entry) => !checks[entry]);
   };
 
   const approveCase = async (caseId) => {
@@ -273,6 +370,15 @@ function ScrutinyDashboard() {
   const raiseDeficiency = async (caseId) => {
     const currentCase = cases.find((item) => item.id === caseId);
     if (!currentCase?.dbId) return;
+    const uncheckedEds = getUncheckedEds(currentCase);
+    const edsMessage =
+      uncheckedEds.length > 0
+        ? `Missing EDS documents:\n${uncheckedEds.map((entry) => `- ${entry}`).join("\n")}`
+        : "";
+    const manualReviewMessage = reviewNote.trim();
+    const deficiencyMessage =
+      [manualReviewMessage, edsMessage].filter(Boolean).join("\n\n") ||
+      "Deficiency raised during document review.";
 
     setApprovalProgressMessage("");
     setApprovalErrorMessage("");
@@ -282,7 +388,7 @@ function ScrutinyDashboard() {
       .from("applications")
       .update({
         status: "deficiency_raised",
-        deficiency_message: reviewNote.trim() || "Deficiency raised during document review.",
+        deficiency_message: deficiencyMessage,
       })
       .eq("id", currentCase.dbId);
 
@@ -470,7 +576,11 @@ function ScrutinyDashboard() {
                 onApprove={approveCase}
                 onBack={() => navigate("/scrutiny-dashboard/under-scrutiny")}
                 onDownload={downloadCaseDocument}
+                onOpenDocument={openDocumentInNewWindow}
                 onRaiseDeficiency={raiseDeficiency}
+                edsChecks={edsChecksByCase[selectedCase?.dbId || selectedCase?.id] ?? {}}
+                edsItems={selectedCase?.eds ?? []}
+                onToggleEds={toggleEdsCheck}
                 reviewNote={reviewNote}
                 setReviewNote={setReviewNote}
               />
@@ -560,6 +670,9 @@ function DashboardSection({
                   #{item.id} - {item.projectName}
                 </p>
                 <p className="mt-1 text-[20px] text-[#5c6f89]">{item.notes}</p>
+                <p className="mt-1 text-[18px] font-semibold text-[#124734]">
+                  Urgency Score: {item.urgencyScore ?? 0}
+                </p>
                 <button
                   className="mt-3 w-full rounded-lg bg-[#124734] px-3 py-2 text-[20px] font-semibold text-white hover:bg-[#0f3a2b]"
                   onClick={() => onReview(item.id)}
@@ -660,8 +773,12 @@ function ReviewPage({
   caseItem,
   onBack,
   onDownload,
+  onOpenDocument,
   onApprove,
   onRaiseDeficiency,
+  edsChecks,
+  edsItems,
+  onToggleEds,
   isUpdatingCase,
   reviewNote,
   setReviewNote,
@@ -739,20 +856,62 @@ function ReviewPage({
                 className="flex items-center justify-between rounded-lg border border-slate-200 bg-[#fcfdfd] px-3 py-2"
                 key={documentItem.id || documentItem.fileName}
               >
-                <span className="inline-flex items-center gap-2 text-[19px] text-[#1f3048]">
-                  <FileText className="h-4 w-4 text-[#536a87]" />
-                  {documentItem.fileName}
-                </span>
                 <button
-                  className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[16px] font-semibold text-[#124734] hover:bg-[#f2f8f4]"
-                  onClick={() => onDownload(caseItem.id, documentItem)}
+                  className="inline-flex items-center gap-2 text-[19px] font-medium text-[#1f3048] underline-offset-2 hover:text-[#124734] hover:underline"
+                  onClick={() => onOpenDocument(documentItem)}
                   type="button"
                 >
-                  <Download className="h-4 w-4" />
-                  Download
+                  <FileText className="h-4 w-4 text-[#536a87]" />
+                  {documentItem.fileName}
                 </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[16px] font-semibold text-[#124734] hover:bg-[#f2f8f4]"
+                    onClick={() => onDownload(caseItem.id, documentItem)}
+                    type="button"
+                  >
+                    <Download className="h-4 w-4" />
+                    Download
+                  </button>
+                </div>
               </div>
             ))}
+          </div>
+
+          <div className="mt-5 rounded-xl border border-slate-200 bg-[#f9fbfa] p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-[18px] font-semibold text-[#536a87]">EDS Checklist</p>
+              <p className="text-[16px] font-medium text-[#6a7f99]">
+                {Object.values(edsChecks).filter(Boolean).length}/{edsItems.length} checked
+              </p>
+            </div>
+            {edsItems.length === 0 ? (
+              <p className="text-[17px] text-[#5c6f89]">
+                No EDS requirements configured for this sector.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {edsItems.map((entry) => (
+                  <label
+                    className="flex items-start gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[17px] text-[#1f3048]"
+                    key={entry}
+                  >
+                    <input
+                      checked={Boolean(edsChecks[entry])}
+                      className="mt-1 h-4 w-4 rounded border-slate-300 text-[#124734] focus:ring-[#124734]/30"
+                      onChange={onToggleEds(caseItem.dbId || caseItem.id, entry)}
+                      type="checkbox"
+                    />
+                    <span>{entry}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+            {edsItems.length > 0 ? (
+              <p className="mt-2 text-[14px] font-medium text-[#6a7f99]">
+                Unchecked EDS items are automatically added to deficiency message.
+              </p>
+            ) : null}
           </div>
 
           <label className="mt-5 block">
@@ -892,6 +1051,12 @@ function toDisplayDate(value) {
     day: "numeric",
     year: "numeric",
   });
+}
+
+function normalizeSectorKey(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase();
 }
 
 export default ScrutinyDashboard;

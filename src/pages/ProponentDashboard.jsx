@@ -38,7 +38,9 @@ function ProponentDashboard() {
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [allowMultipleFiles, setAllowMultipleFiles] = useState(true);
   const [formErrors, setFormErrors] = useState({});
+  const [affidavitChecks, setAffidavitChecks] = useState({});
   const [sectorCategories, setSectorCategories] = useState([]);
+  const [sectorConfigs, setSectorConfigs] = useState([]);
   const [sectorsLoading, setSectorsLoading] = useState(true);
   const [sectorsError, setSectorsError] = useState("");
   const fileInputRef = useRef(null);
@@ -101,6 +103,17 @@ function ProponentDashboard() {
     () => applications.find((application) => application.dbId === editingDraftId) ?? null,
     [applications, editingDraftId],
   );
+  const selectedSectorConfig = useMemo(
+    () => sectorConfigs.find((sector) => sector.name === form.category) ?? null,
+    [sectorConfigs, form.category],
+  );
+  const documentsRequired = selectedSectorConfig?.documentsRequired ?? [];
+  const sectorAffidavits = selectedSectorConfig?.affidavits ?? [];
+  const areAllAffidavitsChecked =
+    sectorAffidavits.length === 0 ||
+    sectorAffidavits.every((affidavit) => Boolean(affidavitChecks[affidavit]));
+  const canSubmitWithAffidavits =
+    sectorAffidavits.length === 0 || areAllAffidavitsChecked;
 
   const selectView = (view) => {
     setActiveView(view);
@@ -129,6 +142,7 @@ function ProponentDashboard() {
       category: application.category || "",
     });
     setSelectedFiles([]);
+    setAffidavitChecks({});
     if (fileInputRef.current) fileInputRef.current.value = "";
     setFormErrors({});
     setCreationMessage("");
@@ -148,7 +162,27 @@ function ProponentDashboard() {
   const handleFormChange = (field) => (event) => {
     const value = event.target.value;
     setForm((current) => ({ ...current, [field]: value }));
-    setFormErrors((current) => ({ ...current, [field]: "" }));
+    setFormErrors((current) => ({ ...current, [field]: "", affidavits: "" }));
+
+    if (field === "category") {
+      setAffidavitChecks({});
+    }
+  };
+
+  const toggleAffidavitCheck = (affidavit) => (event) => {
+    const checked = event.target.checked;
+    setAffidavitChecks((current) => ({ ...current, [affidavit]: checked }));
+    setFormErrors((current) => ({ ...current, affidavits: "" }));
+  };
+
+  const toggleAllAffidavits = (event) => {
+    const checked = event.target.checked;
+    const nextChecks = {};
+    sectorAffidavits.forEach((affidavit) => {
+      nextChecks[affidavit] = checked;
+    });
+    setAffidavitChecks(nextChecks);
+    setFormErrors((current) => ({ ...current, affidavits: "" }));
   };
 
   const handleCreateApplication = async (event) => {
@@ -176,6 +210,14 @@ function ProponentDashboard() {
     }
   };
 
+  const removeSelectedFile = (targetIndex) => {
+    setSelectedFiles((current) => current.filter((_, index) => index !== targetIndex));
+    setFormErrors((current) => ({ ...current, documents: "" }));
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
   const mapDbApplicationToViewModel = (row, gistRow) => {
     const status = mapStatusLabel(row?.status);
     const submittedAt = row?.submitted_at ? new Date(row.submitted_at) : null;
@@ -198,6 +240,10 @@ function ProponentDashboard() {
       deficiencyMessage: row?.deficiency_message || "",
       meetingGistText: String(gistRow?.gist_text ?? ""),
       finalizedMinutes: asObject(gistJson?.minutes),
+      createdAtIso: row?.created_at || null,
+      submittedAtIso: row?.submitted_at || null,
+      gistCreatedAtIso: gistRow?.created_at || null,
+      gistUpdatedAtIso: gistRow?.updated_at || null,
     };
   };
 
@@ -240,7 +286,7 @@ function ProponentDashboard() {
     if (applicationIds.length > 0) {
       const { data: gistRows, error: gistError } = await supabase
         .from("meeting_gists")
-        .select("application_id, gist_text, gist_json")
+        .select("application_id, gist_text, gist_json, created_at, updated_at")
         .in("application_id", applicationIds);
 
       if (gistError) {
@@ -306,6 +352,9 @@ function ProponentDashboard() {
     if (!isDeficiencyResubmission && status === "submitted") {
       if (!form.projectName.trim()) nextErrors.projectName = "Project name is required.";
       if (!form.category.trim()) nextErrors.category = "Category is required.";
+      if (sectorAffidavits.length > 0 && !areAllAffidavitsChecked) {
+        nextErrors.affidavits = "Please check all affidavits before submission.";
+      }
     }
 
     if (status === "submitted" || isDeficiencyResubmission) {
@@ -348,6 +397,7 @@ function ProponentDashboard() {
         }
 
         setSelectedFiles([]);
+        setAffidavitChecks({});
         if (fileInputRef.current) fileInputRef.current.value = "";
         setFormErrors({});
         setCreationMessage("Deficiency response submitted. New documents were uploaded successfully.");
@@ -405,6 +455,7 @@ function ProponentDashboard() {
 
         setForm({ projectName: "", category: "" });
         setSelectedFiles([]);
+        setAffidavitChecks({});
         if (fileInputRef.current) fileInputRef.current.value = "";
         setFormErrors({});
         setEditingDraftId(null);
@@ -462,6 +513,7 @@ function ProponentDashboard() {
 
       setForm({ projectName: "", category: "" });
       setSelectedFiles([]);
+      setAffidavitChecks({});
       if (fileInputRef.current) fileInputRef.current.value = "";
       setFormErrors({});
 
@@ -491,20 +543,32 @@ function ProponentDashboard() {
 
     const { data, error } = await supabase
       .from("sectors")
-      .select("name")
+      .select("name, documents_required, affidavits")
       .order("name", { ascending: true });
 
     if (error) {
       setSectorsError(error.message || "Failed to load sector categories.");
       setSectorCategories([]);
+      setSectorConfigs([]);
       setSectorsLoading(false);
       return;
     }
 
-    const categoryNames = (data ?? [])
-      .map((item) => item.name)
-      .filter((name) => typeof name === "string" && name.trim().length > 0);
+    const configs = (data ?? [])
+      .map((item) => ({
+        name: typeof item?.name === "string" ? item.name.trim() : "",
+        documentsRequired: Array.isArray(item?.documents_required)
+          ? item.documents_required.filter((entry) => typeof entry === "string" && entry.trim())
+          : [],
+        affidavits: Array.isArray(item?.affidavits)
+          ? item.affidavits.filter((entry) => typeof entry === "string" && entry.trim())
+          : [],
+      }))
+      .filter((item) => item.name.length > 0);
 
+    const categoryNames = configs.map((item) => item.name);
+
+    setSectorConfigs(configs);
     setSectorCategories(categoryNames);
     setSectorsLoading(false);
   };
@@ -543,6 +607,7 @@ function ProponentDashboard() {
     });
     setAllowMultipleFiles(Boolean(draftApplication.allowMultipleFiles ?? true));
     setSelectedFiles([]);
+    setAffidavitChecks({});
     if (fileInputRef.current) fileInputRef.current.value = "";
     setFormErrors({});
     setCreationMessage("");
@@ -846,6 +911,70 @@ function ProponentDashboard() {
                       ) : null}
                     </div>
 
+                    {!sectorsLoading && !sectorsError && form.category && selectedSectorConfig ? (
+                      <div className="space-y-3 rounded-xl border border-slate-200 bg-[#f9fbfa] p-4">
+                        <div>
+                          <p className="text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
+                            Documents Required
+                          </p>
+                          {documentsRequired.length > 0 ? (
+                            <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-[#334b6d]">
+                              {documentsRequired.map((entry) => (
+                                <li key={`doc-${entry}`}>{entry}</li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="mt-2 text-sm text-[#5d6f89]">
+                              No specific document list configured by admin for this category.
+                            </p>
+                          )}
+                        </div>
+
+                        <details className="rounded-lg border border-slate-200 bg-white p-3">
+                          <summary className="cursor-pointer text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
+                            Affidavits
+                          </summary>
+                          <div className="mt-3 space-y-2">
+                            {sectorAffidavits.length > 0 ? (
+                              <>
+                                <label className="mb-1 flex items-start gap-2 border-b border-slate-200 pb-2 text-sm font-semibold text-[#124734]">
+                                  <input
+                                    checked={areAllAffidavitsChecked}
+                                    className="mt-0.5"
+                                    onChange={toggleAllAffidavits}
+                                    type="checkbox"
+                                  />
+                                  <span>Check All</span>
+                                </label>
+                                {sectorAffidavits.map((affidavit) => (
+                                  <label
+                                    className="flex items-start gap-2 text-sm text-[#334b6d]"
+                                    key={`aff-${affidavit}`}
+                                  >
+                                    <input
+                                      checked={Boolean(affidavitChecks[affidavit])}
+                                      className="mt-0.5"
+                                      onChange={toggleAffidavitCheck(affidavit)}
+                                      type="checkbox"
+                                    />
+                                    <span>{affidavit}</span>
+                                  </label>
+                                ))}
+                              </>
+                            ) : (
+                              <p className="text-sm text-[#5d6f89]">
+                                No affidavits configured by admin for this category.
+                              </p>
+                            )}
+                          </div>
+                        </details>
+
+                        {formErrors.affidavits ? (
+                          <p className="text-sm font-medium text-rose-600">{formErrors.affidavits}</p>
+                        ) : null}
+                      </div>
+                    ) : null}
+
                     <div className="space-y-2">
                       <label className="block text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
                         Upload Documents (PDF)
@@ -867,10 +996,29 @@ function ProponentDashboard() {
                         type="file"
                       />
                       {selectedFiles.length > 0 ? (
-                        <p className="text-sm text-[#4f6180]">
-                          {selectedFiles.length} file(s) selected:{" "}
-                          {selectedFiles.map((file) => file.name).join(", ")}
-                        </p>
+                        <div className="space-y-2">
+                          <p className="text-sm text-[#4f6180]">
+                            {selectedFiles.length} file(s) selected
+                          </p>
+                          <div className="space-y-1.5">
+                            {selectedFiles.map((file, index) => (
+                              <div
+                                className="flex items-center rounded-lg border border-slate-200 bg-[#f9fbfa] px-3 py-2 text-sm text-[#334b6d]"
+                                key={`${file.name}-${file.size}-${index}`}
+                              >
+                                <span className="min-w-0 truncate">{file.name}</span>
+                                <button
+                                  aria-label={`Remove ${file.name}`}
+                                  className="ml-2 inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border border-rose-200 bg-rose-50 text-base leading-none text-rose-600 hover:bg-rose-100"
+                                  onClick={() => removeSelectedFile(index)}
+                                  type="button"
+                                >
+                                  &times;
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
                       ) : null}
                       {formErrors.documents ? (
                         <p className="text-sm font-medium text-rose-600">{formErrors.documents}</p>
@@ -898,7 +1046,7 @@ function ProponentDashboard() {
                       ) : null}
                       <button
                         className="dashboard-primary-button"
-                        disabled={isSubmittingApplication}
+                        disabled={isSubmittingApplication || !canSubmitWithAffidavits}
                         type="submit"
                       >
                         <PlusIcon />
@@ -912,6 +1060,11 @@ function ProponentDashboard() {
                                 : "Create Application & Pay"}
                         </span>
                       </button>
+                      {!canSubmitWithAffidavits ? (
+                        <p className="text-sm font-medium text-amber-700">
+                          Please check all affidavits to continue.
+                        </p>
+                      ) : null}
                       <button
                         className="dashboard-ghost-button"
                         disabled={isSubmittingApplication}
@@ -1155,6 +1308,7 @@ function WorkflowStagesView({ application, onClose }) {
   }
 
   const currentStageIndex = getWorkflowStageIndex(application.status);
+  const stageTimestamps = getWorkflowStageTimestamps(application);
 
   return (
     <section className="space-y-6">
@@ -1182,7 +1336,7 @@ function WorkflowStagesView({ application, onClose }) {
               const isCurrent = index === currentStageIndex;
               return (
                 <div className="flex flex-1 items-center" key={stage}>
-                  <div className="flex min-w-[130px] flex-col items-center gap-2 px-2 text-center">
+                  <div className="flex min-w-[130px] flex-col items-center gap-1.5 px-2 text-center">
                     <div
                       className={`flex h-10 w-10 items-center justify-center rounded-full border-2 text-sm font-bold ${
                         isCompleted
@@ -1202,6 +1356,17 @@ function WorkflowStagesView({ application, onClose }) {
                       }`}
                     >
                       {stage}
+                    </span>
+                    <span
+                      className={`text-[10px] font-medium ${
+                        isCurrent
+                          ? "text-[#124734]"
+                          : isCompleted
+                            ? "text-[#4f6180]"
+                            : "text-slate-400"
+                      }`}
+                    >
+                      {formatWorkflowStageTimestamp(stageTimestamps[stage])}
                     </span>
                   </div>
                   {index < stages.length - 1 ? (
@@ -1345,12 +1510,61 @@ function slugify(value) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }
 
+function getWorkflowStageTimestamps(application) {
+  const status = String(application?.status ?? "").trim();
+  const createdAt = parseIsoDate(application?.createdAtIso);
+  const submittedAt = parseIsoDate(application?.submittedAtIso);
+  const gistCreatedAt = parseIsoDate(application?.gistCreatedAtIso);
+  const gistUpdatedAt = parseIsoDate(application?.gistUpdatedAtIso);
+
+  const hasSubmitted = isWorkflowAtOrBeyond(status, "Submitted");
+  const hasUnderScrutiny = isWorkflowAtOrBeyond(status, "Under Scrutiny");
+  const hasDeficiency = status === "Deficiency";
+  const hasReferred = isWorkflowAtOrBeyond(status, "Referred");
+  const hasMomGenerated = isWorkflowAtOrBeyond(status, "MoM Generated");
+  const hasFinalized = isWorkflowAtOrBeyond(status, "Finalized");
+
+  return {
+    Draft: createdAt,
+    Submitted: hasSubmitted ? submittedAt || createdAt : null,
+    "Under Scrutiny": hasUnderScrutiny ? submittedAt || createdAt : null,
+    "Deficiency Raised": hasDeficiency ? submittedAt || createdAt : null,
+    Referred: hasReferred ? gistCreatedAt || submittedAt || createdAt : null,
+    "MoM Generated": hasMomGenerated ? gistCreatedAt || submittedAt || createdAt : null,
+    Finalized: hasFinalized ? gistUpdatedAt || gistCreatedAt || submittedAt || createdAt : null,
+  };
+}
+
+function isWorkflowAtOrBeyond(currentStatus, targetStatus) {
+  return getWorkflowStageIndex(currentStatus) >= getWorkflowStageIndex(targetStatus);
+}
+
+function parseIsoDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatWorkflowStageTimestamp(value) {
+  if (!(value instanceof Date)) return "--";
+  return value.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function getWorkflowStageIndex(status) {
   if (status === "Draft") return 0;
   if (status === "Submitted") return 1;
+  if (status === "Under Scrutiny") return 2;
   if (status === "Under Review") return 2;
   if (status === "Deficiency") return 3;
   if (status === "Referred") return 4;
+  if (status === "Meeting Scheduled") return 5;
+  if (status === "Minutes Draft") return 5;
   if (status === "MoM Generated") return 5;
   if (status === "Finalized") return 6;
   return 0;
