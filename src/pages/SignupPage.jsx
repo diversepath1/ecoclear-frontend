@@ -160,7 +160,7 @@ function SignupPage() {
               <AuthInput
                 error={errors.organization}
                 icon={BriefcaseBusiness}
-                label="Organization / Company Name"
+                label="Username"
                 onChange={updateField("organization")}
                 placeholder="GreenGrid Infrastructure"
                 type="text"
