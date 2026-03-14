@@ -19,6 +19,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { supabase } from "../lib/supabaseClient";
+import { exportMomGistPdf, exportMomMinutesPdf } from "../utils/pdfExport";
 
 const sidebarItems = [
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard, route: "/mom-dashboard" },
@@ -273,6 +274,11 @@ function MoMDashboard() {
     const record = cases.find((item) => item.id === caseId);
     if (!record) return;
 
+    if (format === "pdf") {
+      exportMomMinutesPdf(record);
+      return;
+    }
+
     const minutesPayload = record.minutes ?? {};
     const body = [
       `Case Ref: ${record.id}`,
@@ -305,6 +311,11 @@ function MoMDashboard() {
   const exportGistRecord = (caseId, format) => {
     const record = cases.find((item) => item.id === caseId);
     if (!record) return;
+
+    if (format === "pdf") {
+      exportMomGistPdf(record);
+      return;
+    }
 
     const fileName = `${record.id}-meeting-gist.${format === "word" ? "doc" : "pdf"}`;
     const mimeType = format === "word" ? "application/msword" : "application/pdf";

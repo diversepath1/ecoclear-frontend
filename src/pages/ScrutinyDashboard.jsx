@@ -17,6 +17,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { supabase } from "../lib/supabaseClient";
+import { exportScrutinyDocumentPdf } from "../utils/pdfExport";
 
 const APPLICATION_DOCUMENT_BUCKET = "application-documents";
 const LOCAL_AI_BACKEND_URL =
@@ -257,8 +258,37 @@ function ScrutinyDashboard() {
     window.open(data.signedUrl, "_blank", "noopener,noreferrer");
   };
 
-  const downloadCaseDocument = async (caseId, documentItem) => {
+  const downloadCaseDocument = async (caseId, documentItem, format = "source", caseItem = null) => {
     if (!documentItem?.storagePath) return;
+
+    if (format === "pdf") {
+      exportScrutinyDocumentPdf(caseItem, documentItem);
+      return;
+    }
+
+    if (format === "word") {
+      const lines = [
+        `Application ID: ${caseItem?.id || caseId}`,
+        `Applicant Entity: ${caseItem?.entity || "N/A"}`,
+        `Project Name: ${caseItem?.projectName || "N/A"}`,
+        `Category: ${caseItem?.category || "N/A"}`,
+        `Current Status: ${caseItem?.status || "N/A"}`,
+        `Document Name: ${documentItem.fileName || "N/A"}`,
+        `Storage Path: ${documentItem.storagePath}`,
+        "",
+        "This is a scrutiny export record for the selected uploaded document.",
+      ];
+      const blob = new Blob([lines.join("\n")], { type: "application/msword" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${caseId}-${documentItem.fileName || "document"}.doc`.replace(/\s+/g, "_");
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+      return;
+    }
 
     const { data, error } = await supabase.storage
       .from(APPLICATION_DOCUMENT_BUCKET)
@@ -865,14 +895,28 @@ function ReviewPage({
                   {documentItem.fileName}
                 </button>
                 <div className="flex items-center gap-2">
-                  <button
-                    className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[16px] font-semibold text-[#124734] hover:bg-[#f2f8f4]"
-                    onClick={() => onDownload(caseItem.id, documentItem)}
-                    type="button"
-                  >
-                    <Download className="h-4 w-4" />
-                    Download
-                  </button>
+                  <details className="relative inline-block text-left">
+                    <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[16px] font-semibold text-[#124734] hover:bg-[#f2f8f4]">
+                      <Download className="h-4 w-4" />
+                      Download
+                    </summary>
+                    <div className="absolute right-0 z-10 mt-2 min-w-[180px] rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+                      <button
+                        className="block w-full rounded-md px-3 py-2 text-left text-sm text-[#1f3048] hover:bg-slate-50"
+                        onClick={() => onDownload(caseItem.id, documentItem, "word", caseItem)}
+                        type="button"
+                      >
+                        Export as Word
+                      </button>
+                      <button
+                        className="block w-full rounded-md px-3 py-2 text-left text-sm text-[#1f3048] hover:bg-slate-50"
+                        onClick={() => onDownload(caseItem.id, documentItem, "pdf", caseItem)}
+                        type="button"
+                      >
+                        Export as PDF
+                      </button>
+                    </div>
+                  </details>
                 </div>
               </div>
             ))}

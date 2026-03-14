@@ -2,10 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { supabase } from "../lib/supabaseClient";
+import { exportFinalizedApplicationPdf } from "../utils/pdfExport";
 
 const APPLICATION_DOCUMENT_BUCKET = "application-documents";
-const DEMO_UPI_ID = "ecoclear.demo@upi";
-const DEMO_UPI_NAME = "EcoClear Compliance Board";
+const DEFAULT_PAYMENT_SETTINGS = {
+  upiId: "ecoclear.demo@upi",
+  upiName: "EcoClear Compliance Board",
+  qrImageUrl: "",
+};
 const LOCAL_AI_BACKEND_URL =
   import.meta.env.VITE_AI_BACKEND_URL || "http://localhost:8787";
 
@@ -54,6 +58,9 @@ function ProponentDashboard() {
   const [notificationsLoading, setNotificationsLoading] = useState(false);
   const [notificationsError, setNotificationsError] = useState("");
   const [isBellOpen, setIsBellOpen] = useState(false);
+  const [paymentSettings, setPaymentSettings] = useState(DEFAULT_PAYMENT_SETTINGS);
+  const [paymentSettingsLoading, setPaymentSettingsLoading] = useState(false);
+  const [paymentSettingsError, setPaymentSettingsError] = useState("");
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [isChatLoading, setIsChatLoading] = useState(false);
@@ -745,6 +752,39 @@ function ProponentDashboard() {
     setNotificationsLoading(false);
   };
 
+  const loadPaymentSettings = async () => {
+    setPaymentSettingsLoading(true);
+    setPaymentSettingsError("");
+
+    const { data, error } = await supabase
+      .from("payment_settings")
+      .select("upi_id, upi_name, qr_image_url, is_active, updated_at")
+      .eq("is_active", true)
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      setPaymentSettings(DEFAULT_PAYMENT_SETTINGS);
+      setPaymentSettingsError(error.message || "Failed to load payment settings.");
+      setPaymentSettingsLoading(false);
+      return;
+    }
+
+    if (!data) {
+      setPaymentSettings(DEFAULT_PAYMENT_SETTINGS);
+      setPaymentSettingsLoading(false);
+      return;
+    }
+
+    setPaymentSettings({
+      upiId: String(data.upi_id || DEFAULT_PAYMENT_SETTINGS.upiId),
+      upiName: String(data.upi_name || DEFAULT_PAYMENT_SETTINGS.upiName),
+      qrImageUrl: String(data.qr_image_url || "").trim(),
+    });
+    setPaymentSettingsLoading(false);
+  };
+
   useEffect(() => {
     loadSectorCategories();
   }, []);
@@ -850,6 +890,7 @@ function ProponentDashboard() {
   useEffect(() => {
     if (isPaymentRoute) {
       setActiveView("new-app");
+      loadPaymentSettings();
     }
   }, [isPaymentRoute]);
 
@@ -1508,15 +1549,23 @@ function ProponentDashboard() {
 
                   <div className="space-y-5 p-6 sm:p-8">
                     <div className="grid gap-5 md:grid-cols-[200px_1fr]">
-                      <div className="flex h-[200px] w-[200px] items-center justify-center rounded-xl border border-slate-200 bg-[#f9fbfa] text-center">
-                        <div>
-                          <p className="text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
-                            Demo QR
-                          </p>
-                          <p className="mt-2 text-xs text-[#5d6f89]">
-                            Replace with final QR before production
-                          </p>
-                        </div>
+                      <div className="flex h-[200px] w-[200px] items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-[#f9fbfa] text-center">
+                        {paymentSettings.qrImageUrl ? (
+                          <img
+                            alt="UPI QR code"
+                            className="h-full w-full object-contain"
+                            src={paymentSettings.qrImageUrl}
+                          />
+                        ) : (
+                          <div>
+                            <p className="text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
+                              Demo QR
+                            </p>
+                            <p className="mt-2 text-xs text-[#5d6f89]">
+                              Add qr_image_url in payment_settings
+                            </p>
+                          </div>
+                        )}
                       </div>
                       <div className="space-y-3">
                         <div className="rounded-xl border border-slate-200 bg-[#f9fbfa] p-4">
@@ -1524,9 +1573,9 @@ function ProponentDashboard() {
                             UPI ID
                           </p>
                           <p className="mt-1 text-lg font-semibold text-[#1f2c40]">
-                            {DEMO_UPI_ID}
+                            {paymentSettings.upiId}
                           </p>
-                          <p className="mt-1 text-sm text-[#5d6f89]">{DEMO_UPI_NAME}</p>
+                          <p className="mt-1 text-sm text-[#5d6f89]">{paymentSettings.upiName}</p>
                         </div>
                         <label className="block space-y-2">
                           <span className="block text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
@@ -1542,6 +1591,21 @@ function ProponentDashboard() {
                         </label>
                       </div>
                     </div>
+
+                    {paymentSettingsLoading ? (
+                      <p className="text-sm font-medium text-[#5d6f89]">
+                        Loading payment QR settings...
+                      </p>
+                    ) : null}
+
+                    {!paymentSettingsLoading && paymentSettingsError ? (
+                      <div className="flex flex-wrap items-center gap-3">
+                        <p className="text-sm font-medium text-amber-700">{paymentSettingsError}</p>
+                        <button className="dashboard-ghost-button" onClick={loadPaymentSettings} type="button">
+                          Retry
+                        </button>
+                      </div>
+                    ) : null}
 
                     {formErrors.submit ? (
                       <p className="text-sm font-medium text-rose-600">{formErrors.submit}</p>
@@ -1742,27 +1806,32 @@ function ApplicationsTable({
                   {showPaymentAmount ? <span>Rs 500</span> : null}
 
                   {!showPaymentAmount && application.status === "Finalized" ? (
-                    <details className="relative inline-block text-left">
-                      <summary className="inline-flex cursor-pointer list-none items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-[#124734] hover:bg-[#f2f8f4]">
-                        Download
-                      </summary>
-                      <div className="absolute right-0 z-10 mt-2 min-w-[190px] rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
-                        <button
-                          className="block w-full rounded-md px-3 py-2 text-left text-sm text-[#1f3048] hover:bg-slate-50"
-                          onClick={() => exportApplicationRecord(application, "word")}
-                          type="button"
-                        >
-                          Export as Word
-                        </button>
-                        <button
-                          className="block w-full rounded-md px-3 py-2 text-left text-sm text-[#1f3048] hover:bg-slate-50"
-                          onClick={() => exportApplicationRecord(application, "pdf")}
-                          type="button"
-                        >
-                          Export as PDF
-                        </button>
-                      </div>
-                    </details>
+                    <div className="inline-flex max-w-[320px] flex-col items-end gap-2">
+                      <details className="relative inline-block text-left">
+                        <summary className="inline-flex cursor-pointer list-none items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-[#124734] hover:bg-[#f2f8f4]">
+                          Download
+                        </summary>
+                        <div className="absolute right-0 z-10 mt-2 min-w-[190px] rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+                          <button
+                            className="block w-full rounded-md px-3 py-2 text-left text-sm text-[#1f3048] hover:bg-slate-50"
+                            onClick={() => exportApplicationRecord(application, "word")}
+                            type="button"
+                          >
+                            Export as Word
+                          </button>
+                          <button
+                            className="block w-full rounded-md px-3 py-2 text-left text-sm text-[#1f3048] hover:bg-slate-50"
+                            onClick={() => exportApplicationRecord(application, "pdf")}
+                            type="button"
+                          >
+                            Export as PDF
+                          </button>
+                        </div>
+                      </details>
+                      <p className="max-w-[260px] text-right text-xs font-medium text-[#4f6180]">
+                        Certificate will be provided within a week
+                      </p>
+                    </div>
                   ) : null}
 
                   {!showPaymentAmount && application.status === "Deficiency" ? (
@@ -1961,6 +2030,11 @@ function getApplicationValidationErrors({
 }
 
 function exportApplicationRecord(application, format) {
+  if (format === "pdf") {
+    exportFinalizedApplicationPdf(application);
+    return;
+  }
+
   const fileName =
     `${application.id}-${format === "word" ? "finalized-mom.doc" : "finalized-mom.pdf"}`.replace(
       /\s+/g,
@@ -2061,12 +2135,19 @@ function isPdfFile(file) {
 }
 
 function mapDbNotificationToViewModel(row) {
+  const normalizedNewStatus = String(row?.new_status ?? "")
+    .trim()
+    .toLowerCase();
+  const isFinalizedStatus = normalizedNewStatus === "finalized";
+
   return {
     id: row?.id || "",
     applicationId: row?.application_id || "",
     applicationCode: row?.application_code || "",
-    title: row?.title || "Application Status Updated",
-    message: row?.message || "Your application status has changed.",
+    title: isFinalizedStatus ? "Application Finalized" : row?.title || "Application Status Updated",
+    message: isFinalizedStatus
+      ? "Certificate will be provided within a week."
+      : row?.message || "Your application status has changed.",
     isRead: Boolean(row?.is_read),
     readAtIso: row?.read_at || null,
     createdAtIso: row?.created_at || null,
