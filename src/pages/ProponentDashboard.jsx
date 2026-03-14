@@ -50,10 +50,15 @@ function ProponentDashboard() {
   const [sectorConfigs, setSectorConfigs] = useState([]);
   const [sectorsLoading, setSectorsLoading] = useState(true);
   const [sectorsError, setSectorsError] = useState("");
+  const [notifications, setNotifications] = useState([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [notificationsError, setNotificationsError] = useState("");
+  const [isBellOpen, setIsBellOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [chatError, setChatError] = useState("");
+  const bellMenuRef = useRef(null);
   const fileInputRef = useRef(null);
   const draftEditorInitRef = useRef(false);
 
@@ -132,6 +137,10 @@ function ProponentDashboard() {
     sectorAffidavits.every((affidavit) => Boolean(affidavitChecks[affidavit]));
   const canSubmitWithAffidavits =
     sectorAffidavits.length === 0 || areAllAffidavitsChecked;
+  const unreadCount = useMemo(
+    () => notifications.filter((notification) => !notification.isRead).length,
+    [notifications],
+  );
 
   const selectView = (view) => {
     if (isPaymentRoute) {
@@ -705,6 +714,37 @@ function ProponentDashboard() {
     setSectorsLoading(false);
   };
 
+  const loadNotifications = async () => {
+    if (!user?.id) {
+      setNotifications([]);
+      setNotificationsLoading(false);
+      setNotificationsError("");
+      return;
+    }
+
+    setNotificationsLoading(true);
+    setNotificationsError("");
+
+    const { data, error } = await supabase
+      .from("application_notifications")
+      .select(
+        "id, application_id, application_code, old_status, new_status, title, message, is_read, read_at, created_at",
+      )
+      .eq("user_id", user.id)
+      .order("created_at", { ascending: false })
+      .limit(30);
+
+    if (error) {
+      setNotifications([]);
+      setNotificationsError(error.message || "Failed to load notifications.");
+      setNotificationsLoading(false);
+      return;
+    }
+
+    setNotifications((data ?? []).map(mapDbNotificationToViewModel));
+    setNotificationsLoading(false);
+  };
+
   useEffect(() => {
     loadSectorCategories();
   }, []);
@@ -712,6 +752,100 @@ function ProponentDashboard() {
   useEffect(() => {
     loadApplications();
   }, [user?.id]);
+
+  useEffect(() => {
+    loadNotifications();
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) return undefined;
+
+    const channel = supabase
+      .channel(`proponent-notifications-${user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "application_notifications",
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload) => {
+          const nextNotification = mapDbNotificationToViewModel(payload.new);
+          setNotifications((current) => [nextNotification, ...current].slice(0, 30));
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "application_notifications",
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload) => {
+          const nextNotification = mapDbNotificationToViewModel(payload.new);
+          setNotifications((current) =>
+            current.map((notification) =>
+              notification.id === nextNotification.id ? nextNotification : notification,
+            ),
+          );
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!isBellOpen || !user?.id) return;
+
+    const unreadIds = notifications
+      .filter((notification) => !notification.isRead)
+      .map((notification) => notification.id);
+
+    if (unreadIds.length === 0) return;
+
+    const readAt = new Date().toISOString();
+    const unreadIdSet = new Set(unreadIds);
+
+    setNotifications((current) =>
+      current.map((notification) =>
+        unreadIdSet.has(notification.id)
+          ? { ...notification, isRead: true, readAtIso: readAt }
+          : notification,
+      ),
+    );
+
+    const markAsRead = async () => {
+      const { error } = await supabase
+        .from("application_notifications")
+        .update({ is_read: true, read_at: readAt })
+        .in("id", unreadIds)
+        .eq("user_id", user.id);
+
+      if (error) {
+        setNotificationsError(error.message || "Failed to mark notifications as read.");
+      }
+    };
+
+    markAsRead();
+  }, [isBellOpen, notifications, user?.id]);
+
+  useEffect(() => {
+    if (!isBellOpen) return undefined;
+
+    const handleOutsideClick = (event) => {
+      if (!bellMenuRef.current?.contains(event.target)) {
+        setIsBellOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, [isBellOpen]);
 
   useEffect(() => {
     if (isPaymentRoute) {
@@ -761,6 +895,15 @@ function ProponentDashboard() {
       // eslint-disable-next-line no-console
       console.error("Logout failed", error);
     }
+  };
+
+  const toggleBellMenu = () => {
+    setIsBellOpen((current) => !current);
+  };
+
+  const openNotification = () => {
+    setIsBellOpen(false);
+    selectView("my-apps");
   };
 
   return (
@@ -814,10 +957,70 @@ function ProponentDashboard() {
             </label>
 
             <div className="dashboard-toolbar">
-              <button className="dashboard-icon-button" type="button">
-                <BellIcon />
-                <i />
-              </button>
+              <div className="relative" ref={bellMenuRef}>
+                <button
+                  aria-expanded={isBellOpen}
+                  aria-haspopup="menu"
+                  className="dashboard-icon-button"
+                  onClick={toggleBellMenu}
+                  type="button"
+                >
+                  <BellIcon />
+                  {unreadCount > 0 ? <i /> : null}
+                </button>
+
+                {isBellOpen ? (
+                  <div className="absolute right-0 z-30 mt-2 w-[360px] max-w-[85vw] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
+                    <div className="border-b border-slate-200 px-4 py-3">
+                      <p className="text-sm font-semibold text-[#1f2c40]">Notifications</p>
+                      <p className="text-xs text-[#5d6f89]">
+                        {unreadCount > 0
+                          ? `${unreadCount} unread update${unreadCount > 1 ? "s" : ""}`
+                          : "All caught up"}
+                      </p>
+                    </div>
+
+                    <div className="max-h-[360px] overflow-y-auto">
+                      {notificationsLoading ? (
+                        <p className="px-4 py-4 text-sm text-[#5d6f89]">Loading notifications...</p>
+                      ) : null}
+
+                      {!notificationsLoading && notificationsError ? (
+                        <p className="px-4 py-4 text-sm font-medium text-rose-600">
+                          {notificationsError}
+                        </p>
+                      ) : null}
+
+                      {!notificationsLoading &&
+                      !notificationsError &&
+                      notifications.length === 0 ? (
+                        <p className="px-4 py-4 text-sm text-[#5d6f89]">No notifications yet.</p>
+                      ) : null}
+
+                      {!notificationsLoading && !notificationsError
+                        ? notifications.map((notification) => (
+                            <button
+                              className={`w-full border-b border-slate-100 px-4 py-3 text-left transition hover:bg-slate-50 ${
+                                notification.isRead ? "bg-white" : "bg-emerald-50/40"
+                              }`}
+                              key={notification.id}
+                              onClick={openNotification}
+                              type="button"
+                            >
+                              <p className="text-sm font-semibold text-[#1f2c40]">
+                                {notification.title}
+                              </p>
+                              <p className="mt-0.5 text-sm text-[#4f6180]">{notification.message}</p>
+                              <p className="mt-1 text-xs text-slate-500">
+                                {formatNotificationTime(notification.createdAtIso)}
+                              </p>
+                            </button>
+                          ))
+                        : null}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
               <button className="dashboard-icon-button" type="button">
                 <SettingsIcon />
               </button>
@@ -1856,6 +2059,32 @@ function toDisplayDate(value) {
 function isPdfFile(file) {
   const name = file?.name?.toLowerCase() ?? "";
   return file?.type === "application/pdf" || name.endsWith(".pdf");
+}
+
+function mapDbNotificationToViewModel(row) {
+  return {
+    id: row?.id || "",
+    applicationId: row?.application_id || "",
+    applicationCode: row?.application_code || "",
+    title: row?.title || "Application Status Updated",
+    message: row?.message || "Your application status has changed.",
+    isRead: Boolean(row?.is_read),
+    readAtIso: row?.read_at || null,
+    createdAtIso: row?.created_at || null,
+  };
+}
+
+function formatNotificationTime(value) {
+  if (!value) return "Just now";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Just now";
+  return date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 function mapStatusLabel(rawStatus) {
