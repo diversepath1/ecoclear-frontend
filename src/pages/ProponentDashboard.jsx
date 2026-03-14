@@ -4,6 +4,10 @@ import { useAuth } from "../context/AuthContext";
 import { supabase } from "../lib/supabaseClient";
 
 const APPLICATION_DOCUMENT_BUCKET = "application-documents";
+const DEMO_UPI_ID = "ecoclear.demo@upi";
+const DEMO_UPI_NAME = "EcoClear Compliance Board";
+const LOCAL_AI_BACKEND_URL =
+  import.meta.env.VITE_AI_BACKEND_URL || "http://localhost:8787";
 
 const STATUS_LABELS = {
   draft: "Draft",
@@ -23,6 +27,8 @@ function ProponentDashboard() {
   const location = useLocation();
   const navigate = useNavigate();
   const { signOut, user } = useAuth();
+  const normalizedPath = location.pathname.replace(/\/+$/, "") || "/";
+  const isPaymentRoute = normalizedPath === "/proponent-dashboard/payment";
   const [activeView, setActiveView] = useState("dashboard");
   const [applications, setApplications] = useState([]);
   const [applicationsLoading, setApplicationsLoading] = useState(true);
@@ -38,11 +44,16 @@ function ProponentDashboard() {
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [allowMultipleFiles, setAllowMultipleFiles] = useState(true);
   const [formErrors, setFormErrors] = useState({});
+  const [paymentTransactionNumber, setPaymentTransactionNumber] = useState("");
   const [affidavitChecks, setAffidavitChecks] = useState({});
   const [sectorCategories, setSectorCategories] = useState([]);
   const [sectorConfigs, setSectorConfigs] = useState([]);
   const [sectorsLoading, setSectorsLoading] = useState(true);
   const [sectorsError, setSectorsError] = useState("");
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [chatError, setChatError] = useState("");
   const fileInputRef = useRef(null);
   const draftEditorInitRef = useRef(false);
 
@@ -82,6 +93,13 @@ function ProponentDashboard() {
   ];
 
   const recentApplications = applications.slice(0, 5);
+  const successfulPayments = useMemo(
+    () =>
+      applications.filter(
+        (application) => String(application.paymentStatus ?? "").toLowerCase() === "completed",
+      ),
+    [applications],
+  );
   const deficiencyCase = useMemo(
     () => applications.find((application) => application.dbId === deficiencyCaseId) ?? null,
     [applications, deficiencyCaseId],
@@ -116,6 +134,9 @@ function ProponentDashboard() {
     sectorAffidavits.length === 0 || areAllAffidavitsChecked;
 
   const selectView = (view) => {
+    if (isPaymentRoute) {
+      navigate("/proponent-dashboard", { replace: true });
+    }
     setActiveView(view);
     if (view !== "my-apps") setCreationMessage("");
     if (view !== "new-app") {
@@ -185,13 +206,118 @@ function ProponentDashboard() {
     setFormErrors((current) => ({ ...current, affidavits: "" }));
   };
 
+  const sendProponentChatMessage = async () => {
+    const message = chatInput.trim();
+    if (!message || isChatLoading) return;
+
+    const historyForApi = chatMessages.map((item) => ({
+      role: item.role,
+      content: item.content,
+    }));
+
+    setChatMessages((current) => [...current, { role: "user", content: message }]);
+    setChatInput("");
+    setChatError("");
+    setIsChatLoading(true);
+
+    try {
+      const response = await fetch(`${LOCAL_AI_BACKEND_URL}/api/proponent/chat-assist`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          userMessage: message,
+          chatHistory: historyForApi,
+          formDraft: {
+            projectName: form.projectName,
+            category: form.category,
+            allowMultipleFiles,
+            selectedFileNames: selectedFiles.map((file) => file.name),
+          },
+          selectedSector: selectedSectorConfig
+            ? {
+                name: selectedSectorConfig.name,
+                documentsRequired: selectedSectorConfig.documentsRequired,
+                affidavits: selectedSectorConfig.affidavits,
+              }
+            : null,
+        }),
+      });
+
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload?.ok) {
+        throw new Error(payload?.error || "Failed to get AI assistant response.");
+      }
+
+      const assistantMessage =
+        typeof payload.assistantMessage === "string"
+          ? payload.assistantMessage.trim()
+          : "";
+
+      if (!assistantMessage) {
+        throw new Error("Assistant returned an empty response. Try again.");
+      }
+
+      setChatMessages((current) => [
+        ...current,
+        { role: "assistant", content: assistantMessage },
+      ]);
+    } catch (error) {
+      setChatError(error?.message || "AI assistant is temporarily unavailable.");
+    } finally {
+      setIsChatLoading(false);
+    }
+  };
+
   const handleCreateApplication = async (event) => {
     event.preventDefault();
+
+    const isDeficiencyResubmission = Boolean(deficiencyCaseId);
+    const isDraftEditFlow = Boolean(editingDraftId) && !isDeficiencyResubmission;
+
+    if (!isDeficiencyResubmission && !isDraftEditFlow) {
+      const nextErrors = getApplicationValidationErrors({
+        status: "submitted",
+        isDeficiencyResubmission,
+        isDraftEditFlow,
+        form,
+        sectorAffidavits,
+        areAllAffidavitsChecked,
+        selectedFiles,
+      });
+
+      setFormErrors(nextErrors);
+      if (Object.keys(nextErrors).length > 0) return;
+
+      navigate("/proponent-dashboard/payment", { replace: true });
+      return;
+    }
+
     await createApplication("submitted");
   };
 
   const handleSaveDraft = async () => {
     await createApplication("draft");
+  };
+
+  const handlePaymentCompleted = async () => {
+    const didSubmit = await createApplication("submitted", {
+      payment: {
+        status: "completed",
+        transactionId: paymentTransactionNumber.trim() || null,
+        paidAt: new Date().toISOString(),
+      },
+    });
+
+    if (didSubmit) {
+      navigate("/proponent-dashboard", { replace: true });
+    }
+  };
+
+  const handlePaymentBack = () => {
+    navigate("/proponent-dashboard", { replace: true });
+    setActiveView("new-app");
   };
 
   const handleFileSelection = (event) => {
@@ -244,6 +370,9 @@ function ProponentDashboard() {
       submittedAtIso: row?.submitted_at || null,
       gistCreatedAtIso: gistRow?.created_at || null,
       gistUpdatedAtIso: gistRow?.updated_at || null,
+      paymentStatus: row?.payment_status || null,
+      paymentTxnId: row?.payment_txn_id || null,
+      paidAtIso: row?.paid_at || null,
     };
   };
 
@@ -261,7 +390,7 @@ function ProponentDashboard() {
     const { data, error } = await supabase
       .from("applications")
       .select(
-        "id, application_code, project_name, sector_category, status, submitted_at, created_at, deficiency_message, allow_multiple_files, document_count",
+        "id, application_code, project_name, sector_category, status, submitted_at, created_at, deficiency_message, allow_multiple_files, document_count, payment_status, payment_txn_id, paid_at",
       )
       .eq("proponent_id", user.id)
       .order("created_at", { ascending: false });
@@ -343,37 +472,28 @@ function ProponentDashboard() {
     }
   };
 
-  const createApplication = async (status) => {
-    const nextErrors = {};
+  const createApplication = async (status, options = {}) => {
     const isDeficiencyResubmission = Boolean(deficiencyCaseId);
     const isDraftEditFlow = Boolean(editingDraftId) && !isDeficiencyResubmission;
     const existingDocumentCount = editingDraft?.documentCount ?? 0;
-
-    if (!isDeficiencyResubmission && status === "submitted") {
-      if (!form.projectName.trim()) nextErrors.projectName = "Project name is required.";
-      if (!form.category.trim()) nextErrors.category = "Category is required.";
-      if (sectorAffidavits.length > 0 && !areAllAffidavitsChecked) {
-        nextErrors.affidavits = "Please check all affidavits before submission.";
-      }
-    }
-
-    if (status === "submitted" || isDeficiencyResubmission) {
-      const requiresNewFiles = !(isDraftEditFlow && existingDocumentCount > 0);
-      if (selectedFiles.length === 0 && requiresNewFiles) {
-        nextErrors.documents = "At least one PDF file is required.";
-      } else if (!selectedFiles.every((file) => isPdfFile(file))) {
-        nextErrors.documents = "Only PDF files are allowed.";
-      }
-    } else if (!selectedFiles.every((file) => isPdfFile(file))) {
-      nextErrors.documents = "Only PDF files are allowed.";
-    }
+    const payment = options.payment ?? null;
+    const nextErrors = getApplicationValidationErrors({
+      status,
+      isDeficiencyResubmission,
+      isDraftEditFlow,
+      form,
+      sectorAffidavits,
+      areAllAffidavitsChecked,
+      selectedFiles,
+      existingDocumentCount,
+    });
 
     setFormErrors(nextErrors);
-    if (Object.keys(nextErrors).length > 0) return;
+    if (Object.keys(nextErrors).length > 0) return false;
 
     if (!user?.id) {
       setFormErrors({ submit: "You must be logged in to create applications." });
-      return;
+      return false;
     }
 
     setIsSubmittingApplication(true);
@@ -404,15 +524,16 @@ function ProponentDashboard() {
         setDeficiencyCaseId(null);
         await loadApplications();
         setActiveView("my-apps");
+        return true;
       } catch (error) {
         setFormErrors((current) => ({
           ...current,
           submit: error?.message || "Failed to upload deficiency documents.",
         }));
+        return false;
       } finally {
         setIsSubmittingApplication(false);
       }
-      return;
     }
 
     if (isDraftEditFlow) {
@@ -445,7 +566,7 @@ function ProponentDashboard() {
           ...current,
           submit: updateError?.message || "Failed to update draft.",
         }));
-        return;
+        return false;
       }
 
       try {
@@ -468,6 +589,7 @@ function ProponentDashboard() {
 
         await loadApplications();
         setActiveView("my-apps");
+        return true;
       } catch (error) {
         setFormErrors((current) => ({
           ...current,
@@ -475,10 +597,10 @@ function ProponentDashboard() {
             error?.message ||
             "Draft was updated, but document upload failed. Please contact admin.",
         }));
+        return false;
       } finally {
         setIsSubmittingApplication(false);
       }
-      return;
     }
 
     const payload = {
@@ -491,6 +613,13 @@ function ProponentDashboard() {
       allow_multiple_files: allowMultipleFiles,
       document_count: selectedFiles.length,
       submitted_at: status === "submitted" ? new Date().toISOString() : null,
+      ...(status === "submitted" && payment
+        ? {
+            payment_status: payment.status || "completed",
+            payment_txn_id: payment.transactionId || null,
+            paid_at: payment.paidAt || new Date().toISOString(),
+          }
+        : {}),
     };
 
     const { data: createdApplication, error: createError } = await supabase
@@ -505,7 +634,7 @@ function ProponentDashboard() {
         ...current,
         submit: createError?.message || "Failed to create application.",
       }));
-      return;
+      return false;
     }
 
     try {
@@ -514,6 +643,7 @@ function ProponentDashboard() {
       setForm({ projectName: "", category: "" });
       setSelectedFiles([]);
       setAffidavitChecks({});
+      setPaymentTransactionNumber("");
       if (fileInputRef.current) fileInputRef.current.value = "";
       setFormErrors({});
 
@@ -525,6 +655,7 @@ function ProponentDashboard() {
 
       await loadApplications();
       setActiveView("my-apps");
+      return true;
     } catch (error) {
       setFormErrors((current) => ({
         ...current,
@@ -532,6 +663,7 @@ function ProponentDashboard() {
           error?.message ||
           "Application was created, but document upload failed. Please contact admin.",
       }));
+      return false;
     } finally {
       setIsSubmittingApplication(false);
     }
@@ -580,6 +712,12 @@ function ProponentDashboard() {
   useEffect(() => {
     loadApplications();
   }, [user?.id]);
+
+  useEffect(() => {
+    if (isPaymentRoute) {
+      setActiveView("new-app");
+    }
+  }, [isPaymentRoute]);
 
   useEffect(() => {
     if (!draftEditQueryId) {
@@ -706,7 +844,7 @@ function ProponentDashboard() {
               />
             ) : null}
 
-            {!workflowApplicationId && activeView === "dashboard" ? (
+            {!workflowApplicationId && !isPaymentRoute && activeView === "dashboard" ? (
               <>
                 <section className="dashboard-heading">
                   <div>
@@ -812,7 +950,7 @@ function ProponentDashboard() {
               </>
             ) : null}
 
-            {!workflowApplicationId && activeView === "new-app" ? (
+            {!workflowApplicationId && !isPaymentRoute && activeView === "new-app" ? (
               <section className="space-y-6">
                 <section className="dashboard-heading">
                   <div>
@@ -833,196 +971,374 @@ function ProponentDashboard() {
                   </div>
                 </section>
 
-                <article className="dashboard-panel overflow-visible">
-                  <div className="dashboard-panel-header">
-                    <h2>Application Details</h2>
-                  </div>
-
-                  <form className="space-y-5 p-6 sm:p-8" onSubmit={handleCreateApplication}>
-                    <div className="space-y-2">
-                      <label className="block text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
-                        Project Name
-                      </label>
-                      <input
-                        className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-base text-[#1f2c40] outline-none transition focus:border-[#124734] focus:ring-2 focus:ring-[#124734]/15"
-                        disabled={Boolean(deficiencyCase)}
-                        onChange={handleFormChange("projectName")}
-                        placeholder="Enter project name"
-                        type="text"
-                        value={form.projectName}
-                      />
-                      {deficiencyCase ? (
-                        <p className="text-sm font-medium text-[#5d6f89]">
-                          Project name is locked for deficiency resubmission.
-                        </p>
-                      ) : null}
-                      {formErrors.projectName ? (
-                        <p className="text-sm font-medium text-rose-600">{formErrors.projectName}</p>
-                      ) : null}
+                <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.7fr)_minmax(360px,1fr)]">
+                  <article className="dashboard-panel overflow-visible">
+                    <div className="dashboard-panel-header">
+                      <h2>Application Details</h2>
                     </div>
 
-                    <div className="space-y-2">
-                      <label className="block text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
-                        Category
-                      </label>
-                      <select
-                        className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-base text-[#1f2c40] outline-none transition focus:border-[#124734] focus:ring-2 focus:ring-[#124734]/15"
-                        disabled={sectorsLoading || Boolean(deficiencyCase)}
-                        onChange={handleFormChange("category")}
-                        value={form.category}
-                      >
-                        <option value="">
-                          {sectorsLoading
-                            ? "Loading sector categories..."
-                            : "Select sector category"}
-                        </option>
-                        {sectorCategories.map((sectorName) => (
-                          <option key={sectorName} value={sectorName}>
-                            {sectorName}
-                          </option>
-                        ))}
-                      </select>
-                      {!sectorsLoading && sectorsError ? (
-                        <div className="flex flex-wrap items-center gap-3">
-                          <p className="text-sm font-medium text-rose-600">{sectorsError}</p>
-                          <button
-                            className="dashboard-ghost-button"
-                            onClick={loadSectorCategories}
-                            type="button"
-                          >
-                            Retry
-                          </button>
-                        </div>
-                      ) : null}
-                      {!sectorsLoading &&
-                      !sectorsError &&
-                      sectorCategories.length === 0 ? (
-                        <p className="text-sm font-medium text-amber-700">
-                          No sectors found in database. Please ask admin to add sectors.
-                        </p>
-                      ) : null}
-                      {deficiencyCase ? (
-                        <p className="text-sm font-medium text-[#5d6f89]">
-                          Category is locked for deficiency resubmission.
-                        </p>
-                      ) : null}
-                      {formErrors.category ? (
-                        <p className="text-sm font-medium text-rose-600">{formErrors.category}</p>
-                      ) : null}
-                    </div>
-
-                    {!sectorsLoading && !sectorsError && form.category && selectedSectorConfig ? (
-                      <div className="space-y-3 rounded-xl border border-slate-200 bg-[#f9fbfa] p-4">
-                        <div>
-                          <p className="text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
-                            Documents Required
+                    <form className="space-y-5 p-6 sm:p-8" onSubmit={handleCreateApplication}>
+                      <div className="space-y-2">
+                        <label className="block text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
+                          Project Name
+                        </label>
+                        <input
+                          className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-base text-[#1f2c40] outline-none transition focus:border-[#124734] focus:ring-2 focus:ring-[#124734]/15"
+                          disabled={Boolean(deficiencyCase)}
+                          onChange={handleFormChange("projectName")}
+                          placeholder="Enter project name"
+                          type="text"
+                          value={form.projectName}
+                        />
+                        {deficiencyCase ? (
+                          <p className="text-sm font-medium text-[#5d6f89]">
+                            Project name is locked for deficiency resubmission.
                           </p>
-                          {documentsRequired.length > 0 ? (
-                            <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-[#334b6d]">
-                              {documentsRequired.map((entry) => (
-                                <li key={`doc-${entry}`}>{entry}</li>
-                              ))}
-                            </ul>
-                          ) : (
-                            <p className="mt-2 text-sm text-[#5d6f89]">
-                              No specific document list configured by admin for this category.
-                            </p>
-                          )}
-                        </div>
+                        ) : null}
+                        {formErrors.projectName ? (
+                          <p className="text-sm font-medium text-rose-600">{formErrors.projectName}</p>
+                        ) : null}
+                      </div>
 
-                        <details className="rounded-lg border border-slate-200 bg-white p-3">
-                          <summary className="cursor-pointer text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
-                            Affidavits
-                          </summary>
-                          <div className="mt-3 space-y-2">
-                            {sectorAffidavits.length > 0 ? (
-                              <>
-                                <label className="mb-1 flex items-start gap-2 border-b border-slate-200 pb-2 text-sm font-semibold text-[#124734]">
-                                  <input
-                                    checked={areAllAffidavitsChecked}
-                                    className="mt-0.5"
-                                    onChange={toggleAllAffidavits}
-                                    type="checkbox"
-                                  />
-                                  <span>Check All</span>
-                                </label>
-                                {sectorAffidavits.map((affidavit) => (
-                                  <label
-                                    className="flex items-start gap-2 text-sm text-[#334b6d]"
-                                    key={`aff-${affidavit}`}
-                                  >
-                                    <input
-                                      checked={Boolean(affidavitChecks[affidavit])}
-                                      className="mt-0.5"
-                                      onChange={toggleAffidavitCheck(affidavit)}
-                                      type="checkbox"
-                                    />
-                                    <span>{affidavit}</span>
-                                  </label>
+                      <div className="space-y-2">
+                        <label className="block text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
+                          Category
+                        </label>
+                        <select
+                          className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-base text-[#1f2c40] outline-none transition focus:border-[#124734] focus:ring-2 focus:ring-[#124734]/15"
+                          disabled={sectorsLoading || Boolean(deficiencyCase)}
+                          onChange={handleFormChange("category")}
+                          value={form.category}
+                        >
+                          <option value="">
+                            {sectorsLoading
+                              ? "Loading sector categories..."
+                              : "Select sector category"}
+                          </option>
+                          {sectorCategories.map((sectorName) => (
+                            <option key={sectorName} value={sectorName}>
+                              {sectorName}
+                            </option>
+                          ))}
+                        </select>
+                        {!sectorsLoading && sectorsError ? (
+                          <div className="flex flex-wrap items-center gap-3">
+                            <p className="text-sm font-medium text-rose-600">{sectorsError}</p>
+                            <button
+                              className="dashboard-ghost-button"
+                              onClick={loadSectorCategories}
+                              type="button"
+                            >
+                              Retry
+                            </button>
+                          </div>
+                        ) : null}
+                        {!sectorsLoading &&
+                        !sectorsError &&
+                        sectorCategories.length === 0 ? (
+                          <p className="text-sm font-medium text-amber-700">
+                            No sectors found in database. Please ask admin to add sectors.
+                          </p>
+                        ) : null}
+                        {deficiencyCase ? (
+                          <p className="text-sm font-medium text-[#5d6f89]">
+                            Category is locked for deficiency resubmission.
+                          </p>
+                        ) : null}
+                        {formErrors.category ? (
+                          <p className="text-sm font-medium text-rose-600">{formErrors.category}</p>
+                        ) : null}
+                      </div>
+
+                      {!sectorsLoading && !sectorsError && form.category && selectedSectorConfig ? (
+                        <div className="space-y-3 rounded-xl border border-slate-200 bg-[#f9fbfa] p-4">
+                          <div>
+                            <p className="text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
+                              Documents Required
+                            </p>
+                            {documentsRequired.length > 0 ? (
+                              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-[#334b6d]">
+                                {documentsRequired.map((entry) => (
+                                  <li key={`doc-${entry}`}>{entry}</li>
                                 ))}
-                              </>
+                              </ul>
                             ) : (
-                              <p className="text-sm text-[#5d6f89]">
-                                No affidavits configured by admin for this category.
+                              <p className="mt-2 text-sm text-[#5d6f89]">
+                                No specific document list configured by admin for this category.
                               </p>
                             )}
                           </div>
-                        </details>
 
-                        {formErrors.affidavits ? (
-                          <p className="text-sm font-medium text-rose-600">{formErrors.affidavits}</p>
-                        ) : null}
-                      </div>
-                    ) : null}
+                          <details className="rounded-lg border border-slate-200 bg-white p-3">
+                            <summary className="cursor-pointer text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
+                              Affidavits
+                            </summary>
+                            <div className="mt-3 space-y-2">
+                              {sectorAffidavits.length > 0 ? (
+                                <>
+                                  <label className="mb-1 flex items-start gap-2 border-b border-slate-200 pb-2 text-sm font-semibold text-[#124734]">
+                                    <input
+                                      checked={areAllAffidavitsChecked}
+                                      className="mt-0.5"
+                                      onChange={toggleAllAffidavits}
+                                      type="checkbox"
+                                    />
+                                    <span>Check All</span>
+                                  </label>
+                                  {sectorAffidavits.map((affidavit) => (
+                                    <label
+                                      className="flex items-start gap-2 text-sm text-[#334b6d]"
+                                      key={`aff-${affidavit}`}
+                                    >
+                                      <input
+                                        checked={Boolean(affidavitChecks[affidavit])}
+                                        className="mt-0.5"
+                                        onChange={toggleAffidavitCheck(affidavit)}
+                                        type="checkbox"
+                                      />
+                                      <span>{affidavit}</span>
+                                    </label>
+                                  ))}
+                                </>
+                              ) : (
+                                <p className="text-sm text-[#5d6f89]">
+                                  No affidavits configured by admin for this category.
+                                </p>
+                              )}
+                            </div>
+                          </details>
 
-                    <div className="space-y-2">
-                      <label className="block text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
-                        Upload Documents (PDF)
-                      </label>
-                      <label className="inline-flex items-center gap-2 text-sm font-medium text-[#4f6180]">
-                        <input
-                          checked={allowMultipleFiles}
-                          onChange={handleAllowMultipleToggle}
-                          type="checkbox"
-                        />
-                        Allow multiple PDF files
-                      </label>
-                      <input
-                        ref={fileInputRef}
-                        accept=".pdf,application/pdf"
-                        className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-base text-[#1f2c40] outline-none transition file:mr-3 file:rounded-lg file:border-0 file:bg-[#124734] file:px-3 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-[#0f3a2b] focus:border-[#124734] focus:ring-2 focus:ring-[#124734]/15"
-                        multiple={allowMultipleFiles}
-                        onChange={handleFileSelection}
-                        type="file"
-                      />
-                      {selectedFiles.length > 0 ? (
-                        <div className="space-y-2">
-                          <p className="text-sm text-[#4f6180]">
-                            {selectedFiles.length} file(s) selected
-                          </p>
-                          <div className="space-y-1.5">
-                            {selectedFiles.map((file, index) => (
-                              <div
-                                className="flex items-center rounded-lg border border-slate-200 bg-[#f9fbfa] px-3 py-2 text-sm text-[#334b6d]"
-                                key={`${file.name}-${file.size}-${index}`}
-                              >
-                                <span className="min-w-0 truncate">{file.name}</span>
-                                <button
-                                  aria-label={`Remove ${file.name}`}
-                                  className="ml-2 inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border border-rose-200 bg-rose-50 text-base leading-none text-rose-600 hover:bg-rose-100"
-                                  onClick={() => removeSelectedFile(index)}
-                                  type="button"
-                                >
-                                  &times;
-                                </button>
-                              </div>
-                            ))}
-                          </div>
+                          {formErrors.affidavits ? (
+                            <p className="text-sm font-medium text-rose-600">{formErrors.affidavits}</p>
+                          ) : null}
                         </div>
                       ) : null}
-                      {formErrors.documents ? (
-                        <p className="text-sm font-medium text-rose-600">{formErrors.documents}</p>
+
+                      <div className="space-y-2">
+                        <label className="block text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
+                          Upload Documents (PDF)
+                        </label>
+                        <label className="inline-flex items-center gap-2 text-sm font-medium text-[#4f6180]">
+                          <input
+                            checked={allowMultipleFiles}
+                            onChange={handleAllowMultipleToggle}
+                            type="checkbox"
+                          />
+                          Allow multiple PDF files
+                        </label>
+                        <input
+                          ref={fileInputRef}
+                          accept=".pdf,application/pdf"
+                          className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-base text-[#1f2c40] outline-none transition file:mr-3 file:rounded-lg file:border-0 file:bg-[#124734] file:px-3 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-[#0f3a2b] focus:border-[#124734] focus:ring-2 focus:ring-[#124734]/15"
+                          multiple={allowMultipleFiles}
+                          onChange={handleFileSelection}
+                          type="file"
+                        />
+                        {selectedFiles.length > 0 ? (
+                          <div className="space-y-2">
+                            <p className="text-sm text-[#4f6180]">
+                              {selectedFiles.length} file(s) selected
+                            </p>
+                            <div className="space-y-1.5">
+                              {selectedFiles.map((file, index) => (
+                                <div
+                                  className="flex items-center rounded-lg border border-slate-200 bg-[#f9fbfa] px-3 py-2 text-sm text-[#334b6d]"
+                                  key={`${file.name}-${file.size}-${index}`}
+                                >
+                                  <span className="min-w-0 truncate">{file.name}</span>
+                                  <button
+                                    aria-label={`Remove ${file.name}`}
+                                    className="ml-2 inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border border-rose-200 bg-rose-50 text-base leading-none text-rose-600 hover:bg-rose-100"
+                                    onClick={() => removeSelectedFile(index)}
+                                    type="button"
+                                  >
+                                    &times;
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {formErrors.documents ? (
+                          <p className="text-sm font-medium text-rose-600">{formErrors.documents}</p>
+                        ) : null}
+                      </div>
+
+                      {formErrors.submit ? (
+                        <p className="text-sm font-medium text-rose-600">{formErrors.submit}</p>
                       ) : null}
+
+                      <div className="flex flex-wrap items-center gap-3">
+                        {!deficiencyCase ? (
+                          <button
+                            className="dashboard-ghost-button"
+                            disabled={isSubmittingApplication}
+                            onClick={handleSaveDraft}
+                            type="button"
+                          >
+                            {isSubmittingApplication
+                              ? "Saving..."
+                              : editingDraftId
+                                ? "Update Draft"
+                                : "Save as Draft"}
+                          </button>
+                        ) : null}
+                        <button
+                          className="dashboard-primary-button"
+                          disabled={isSubmittingApplication || !canSubmitWithAffidavits}
+                          type="submit"
+                        >
+                          <PlusIcon />
+                          <span>
+                            {isSubmittingApplication
+                              ? "Saving..."
+                              : deficiencyCase
+                                ? "Upload Documents & Resubmit"
+                                : editingDraftId
+                                  ? "Update Application & Pay"
+                                  : "Create Application & Pay"}
+                          </span>
+                        </button>
+                        {!canSubmitWithAffidavits ? (
+                          <p className="text-sm font-medium text-amber-700">
+                            Please check all affidavits to continue.
+                          </p>
+                        ) : null}
+                        <button
+                          className="dashboard-ghost-button"
+                          disabled={isSubmittingApplication}
+                          onClick={() => selectView("dashboard")}
+                          type="button"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  </article>
+
+                  <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm xl:sticky xl:top-24 xl:min-h-[68vh]">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-violet-100 text-violet-700">
+                        <AssistantChatIcon />
+                      </span>
+                      <div>
+                        <h2 className="text-[28px] font-semibold tracking-tight text-[#111f3b]">
+                          AI Assistant
+                        </h2>
+                        <p className="text-[18px] text-[#5a6f8d]">
+                          Ask for help to fill the application form.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 h-[360px] min-h-[320px] max-h-[72vh] resize-y space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-[#f9fbfa] p-4 sm:h-[420px] xl:h-[48vh]">
+                      {chatMessages.length === 0 ? (
+                        <p className="text-[18px] text-[#5a6f8d]">
+                          Ask AI what to enter in project name, category, required documents, or affidavits.
+                        </p>
+                      ) : (
+                        chatMessages.map((message, index) => (
+                          <div
+                            className={`max-w-[92%] rounded-xl px-4 py-2 text-[18px] ${
+                              message.role === "user"
+                                ? "ml-auto bg-[#124734] text-white"
+                                : "mr-auto border border-slate-200 bg-white text-[#1f3048]"
+                            }`}
+                            key={`${message.role}-${index}`}
+                          >
+                            {message.content}
+                          </div>
+                        ))
+                      )}
+
+                      {isChatLoading ? (
+                        <div className="mr-auto inline-flex rounded-xl border border-slate-200 bg-white px-4 py-2 text-[18px] text-[#5a6f8d]">
+                          AI is thinking...
+                        </div>
+                      ) : null}
+                    </div>
+
+                    {chatError ? (
+                      <p className="mt-3 text-[17px] font-semibold text-rose-600">{chatError}</p>
+                    ) : null}
+
+                    <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                      <input
+                        className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-[18px] text-[#1f2c40] outline-none placeholder:text-slate-400 focus:border-[#124734] focus:ring-2 focus:ring-[#124734]/10"
+                        onChange={(event) => setChatInput(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && !event.shiftKey) {
+                            event.preventDefault();
+                            sendProponentChatMessage();
+                          }
+                        }}
+                        placeholder="Ask AI to help fill this form..."
+                        value={chatInput}
+                      />
+                      <button
+                        className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#124734] px-4 text-[18px] font-semibold text-white shadow-[0_12px_24px_rgba(18,71,52,0.2)] hover:bg-[#0f3a2b] disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={isChatLoading || !chatInput.trim()}
+                        onClick={sendProponentChatMessage}
+                        type="button"
+                      >
+                        <AssistantSendIcon />
+                        Send
+                      </button>
+                    </div>
+                  </article>
+                </div>
+              </section>
+            ) : null}
+
+            {!workflowApplicationId && isPaymentRoute ? (
+              <section className="space-y-6">
+                <section className="dashboard-heading">
+                  <div>
+                    <h1>Payment</h1>
+                    <p>Complete payment and continue submission to scrutiny.</p>
+                  </div>
+                </section>
+
+                <article className="dashboard-panel overflow-visible">
+                  <div className="dashboard-panel-header">
+                    <h2>UPI Payment Details</h2>
+                  </div>
+
+                  <div className="space-y-5 p-6 sm:p-8">
+                    <div className="grid gap-5 md:grid-cols-[200px_1fr]">
+                      <div className="flex h-[200px] w-[200px] items-center justify-center rounded-xl border border-slate-200 bg-[#f9fbfa] text-center">
+                        <div>
+                          <p className="text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
+                            Demo QR
+                          </p>
+                          <p className="mt-2 text-xs text-[#5d6f89]">
+                            Replace with final QR before production
+                          </p>
+                        </div>
+                      </div>
+                      <div className="space-y-3">
+                        <div className="rounded-xl border border-slate-200 bg-[#f9fbfa] p-4">
+                          <p className="text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
+                            UPI ID
+                          </p>
+                          <p className="mt-1 text-lg font-semibold text-[#1f2c40]">
+                            {DEMO_UPI_ID}
+                          </p>
+                          <p className="mt-1 text-sm text-[#5d6f89]">{DEMO_UPI_NAME}</p>
+                        </div>
+                        <label className="block space-y-2">
+                          <span className="block text-sm font-semibold uppercase tracking-[0.12em] text-[#4f6180]">
+                            Transaction Number (Optional)
+                          </span>
+                          <input
+                            className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-base text-[#1f2c40] outline-none transition focus:border-[#124734] focus:ring-2 focus:ring-[#124734]/15"
+                            onChange={(event) => setPaymentTransactionNumber(event.target.value)}
+                            placeholder="Enter payment transaction number"
+                            type="text"
+                            value={paymentTransactionNumber}
+                          />
+                        </label>
+                      </div>
                     </div>
 
                     {formErrors.submit ? (
@@ -1030,56 +1346,30 @@ function ProponentDashboard() {
                     ) : null}
 
                     <div className="flex flex-wrap items-center gap-3">
-                      {!deficiencyCase ? (
-                        <button
-                          className="dashboard-ghost-button"
-                          disabled={isSubmittingApplication}
-                          onClick={handleSaveDraft}
-                          type="button"
-                        >
-                          {isSubmittingApplication
-                            ? "Saving..."
-                            : editingDraftId
-                              ? "Update Draft"
-                              : "Save as Draft"}
-                        </button>
-                      ) : null}
                       <button
                         className="dashboard-primary-button"
-                        disabled={isSubmittingApplication || !canSubmitWithAffidavits}
-                        type="submit"
+                        disabled={isSubmittingApplication}
+                        onClick={handlePaymentCompleted}
+                        type="button"
                       >
                         <PlusIcon />
-                        <span>
-                          {isSubmittingApplication
-                            ? "Saving..."
-                            : deficiencyCase
-                              ? "Upload Documents & Resubmit"
-                              : editingDraftId
-                                ? "Update Application & Pay"
-                                : "Create Application & Pay"}
-                        </span>
+                        <span>{isSubmittingApplication ? "Submitting..." : "Payment Completed"}</span>
                       </button>
-                      {!canSubmitWithAffidavits ? (
-                        <p className="text-sm font-medium text-amber-700">
-                          Please check all affidavits to continue.
-                        </p>
-                      ) : null}
                       <button
                         className="dashboard-ghost-button"
                         disabled={isSubmittingApplication}
-                        onClick={() => selectView("dashboard")}
+                        onClick={handlePaymentBack}
                         type="button"
                       >
-                        Cancel
+                        Back to Application
                       </button>
                     </div>
-                  </form>
+                  </div>
                 </article>
               </section>
             ) : null}
 
-            {!workflowApplicationId && activeView === "my-apps" ? (
+            {!workflowApplicationId && !isPaymentRoute && activeView === "my-apps" ? (
               <section className="space-y-6">
                 <section className="dashboard-heading">
                   <div>
@@ -1130,12 +1420,50 @@ function ProponentDashboard() {
               </section>
             ) : null}
 
-            {!workflowApplicationId &&
-            (activeView === "payments" || activeView === "tracking") ? (
+            {!workflowApplicationId && !isPaymentRoute && activeView === "payments" ? (
               <section className="space-y-6">
                 <section className="dashboard-heading">
                   <div>
-                    <h1>{activeView === "payments" ? "Payments" : "Tracking"}</h1>
+                    <h1>Payments</h1>
+                    <p>All successful payments submitted by you.</p>
+                  </div>
+                </section>
+
+                <article className="dashboard-panel">
+                  <div className="dashboard-panel-header">
+                    <h2>Applications List</h2>
+                  </div>
+
+                  {applicationsError ? (
+                    <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 px-6 py-4">
+                      <p className="text-sm font-medium text-rose-600">{applicationsError}</p>
+                      <button className="dashboard-ghost-button" onClick={loadApplications} type="button">
+                        Retry
+                      </button>
+                    </div>
+                  ) : null}
+
+                  {applicationsLoading ? (
+                    <div className="px-6 py-6 text-sm font-medium text-[#5d6f89]">
+                      Loading successful payments from database...
+                    </div>
+                  ) : (
+                    <ApplicationsTable applications={successfulPayments} showPaymentAmount />
+                  )}
+
+                  <div className="dashboard-panel-footer">
+                    <p>Showing successful payments only.</p>
+                    <p>Total: {successfulPayments.length}</p>
+                  </div>
+                </article>
+              </section>
+            ) : null}
+
+            {!workflowApplicationId && !isPaymentRoute && activeView === "tracking" ? (
+              <section className="space-y-6">
+                <section className="dashboard-heading">
+                  <div>
+                    <h1>Tracking</h1>
                     <p>This section is reserved and can be connected to backend workflows next.</p>
                   </div>
                 </section>
@@ -1157,6 +1485,7 @@ function ProponentDashboard() {
 function ApplicationsTable({
   applications,
   enableWorkflowLinks = false,
+  showPaymentAmount = false,
   onOpenDraft,
   onOpenDeficiency,
   onOpenWorkflow,
@@ -1171,7 +1500,9 @@ function ApplicationsTable({
             <th>Category</th>
             <th>Status</th>
             <th>Date Submitted</th>
-            <th className="align-right">Action</th>
+            <th className={showPaymentAmount ? "" : "align-right"}>
+              {showPaymentAmount ? "Amount" : "Action"}
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -1205,8 +1536,10 @@ function ApplicationsTable({
                   </span>
                 </td>
                 <td className="app-category">{application.date}</td>
-                <td className="align-right">
-                  {application.status === "Finalized" ? (
+                <td className={showPaymentAmount ? "app-category" : "align-right"}>
+                  {showPaymentAmount ? <span>Rs 500</span> : null}
+
+                  {!showPaymentAmount && application.status === "Finalized" ? (
                     <details className="relative inline-block text-left">
                       <summary className="inline-flex cursor-pointer list-none items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-[#124734] hover:bg-[#f2f8f4]">
                         Download
@@ -1230,7 +1563,7 @@ function ApplicationsTable({
                     </details>
                   ) : null}
 
-                  {application.status === "Deficiency" ? (
+                  {!showPaymentAmount && application.status === "Deficiency" ? (
                     onOpenDeficiency ? (
                       <button
                         className="inline-block max-w-[320px] rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-left text-sm font-semibold text-rose-700 underline decoration-rose-400 underline-offset-2 hover:bg-rose-100"
@@ -1250,7 +1583,7 @@ function ApplicationsTable({
                     )
                   ) : null}
 
-                  {application.status === "Draft" ? (
+                  {!showPaymentAmount && application.status === "Draft" ? (
                     onOpenDraft ? (
                       <button
                         className="inline-flex items-center rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-[#124734] hover:bg-[#f2f8f4]"
@@ -1263,7 +1596,8 @@ function ApplicationsTable({
                     ) : null
                   ) : null}
 
-                  {application.status !== "Finalized" &&
+                  {!showPaymentAmount &&
+                  application.status !== "Finalized" &&
                   application.status !== "Deficiency" &&
                   application.status !== "Draft" ? (
                     <button className="table-action" title="More actions" type="button">
@@ -1388,6 +1722,40 @@ function WorkflowStagesView({ application, onClose }) {
 
 function formatCount(value) {
   return String(value).padStart(2, "0");
+}
+
+function getApplicationValidationErrors({
+  status,
+  isDeficiencyResubmission,
+  isDraftEditFlow,
+  form,
+  sectorAffidavits,
+  areAllAffidavitsChecked,
+  selectedFiles,
+  existingDocumentCount = 0,
+}) {
+  const nextErrors = {};
+
+  if (!isDeficiencyResubmission && status === "submitted") {
+    if (!form.projectName.trim()) nextErrors.projectName = "Project name is required.";
+    if (!form.category.trim()) nextErrors.category = "Category is required.";
+    if (sectorAffidavits.length > 0 && !areAllAffidavitsChecked) {
+      nextErrors.affidavits = "Please check all affidavits before submission.";
+    }
+  }
+
+  if (status === "submitted" || isDeficiencyResubmission) {
+    const requiresNewFiles = !(isDraftEditFlow && existingDocumentCount > 0);
+    if (selectedFiles.length === 0 && requiresNewFiles) {
+      nextErrors.documents = "At least one PDF file is required.";
+    } else if (!selectedFiles.every((file) => isPdfFile(file))) {
+      nextErrors.documents = "Only PDF files are allowed.";
+    }
+  } else if (!selectedFiles.every((file) => isPdfFile(file))) {
+    nextErrors.documents = "Only PDF files are allowed.";
+  }
+
+  return nextErrors;
 }
 
 function exportApplicationRecord(application, format) {
@@ -1683,6 +2051,24 @@ function InfoIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="12" cy="12" r="9" />
       <path d="M12 10.5v4.5M12 7.8h.01" />
+    </svg>
+  );
+}
+
+function AssistantChatIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5 5.75A2.75 2.75 0 0 1 7.75 3h8.5A2.75 2.75 0 0 1 19 5.75v7.5A2.75 2.75 0 0 1 16.25 16H10l-3.4 3.4c-.62.62-1.6.18-1.6-.7V16.1A2.74 2.74 0 0 1 5 13.25v-7.5Z" />
+      <path d="M8.5 8.75h7M8.5 12h4.5" />
+    </svg>
+  );
+}
+
+function AssistantSendIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m3.6 11.6 15.8-7c.84-.37 1.72.5 1.35 1.35l-7 15.8c-.42.94-1.8.83-2.06-.16L9.9 14.5 2.8 12.66c-.98-.25-1.07-1.62-.15-2.06Z" />
+      <path d="m9.9 14.5 4.6-4.6" />
     </svg>
   );
 }

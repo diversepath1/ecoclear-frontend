@@ -36,7 +36,6 @@ const navItems = [
   { key: "sector-parameters", label: "Sector Parameters", icon: SlidersHorizontal },
   { key: "templates", label: "Templates", icon: FileText },
   { key: "audit-logs", label: "Audit Logs", icon: Archive },
-  { key: "notifications", label: "Notifications", icon: Bell, badge: "12" },
   { key: "profile", label: "Profile", icon: UserCircle2 },
 ];
 
@@ -103,6 +102,18 @@ function normalizeApplicationStage(status) {
   return null;
 }
 
+function mapPaymentLogStatusLabel(status) {
+  const normalized = normalizeApplicationStage(status);
+  if (normalized === "submitted") return "Submitted";
+  if (normalized === "under_review") return "Under Review";
+  if (normalized === "deficiency") return "Deficiency";
+  if (normalized === "referred") return "Referred";
+  if (normalized === "mom_generated") return "MoM Generated";
+  if (normalized === "finalized") return "Finalized";
+  if (normalized === "draft") return "Draft";
+  return "Submitted";
+}
+
 const fieldTypeOptions = [
   { value: "short_text", label: "Short text" },
   { value: "long_text", label: "Long text" },
@@ -142,6 +153,16 @@ function toTemplateDate(value) {
   const date = value ? new Date(value) : null;
   if (!date || Number.isNaN(date.getTime())) return todayISO();
   return date.toISOString().split("T")[0];
+}
+
+function toDisplayDate(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) return "Not available";
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }
 
 function mapTemplateRow(row) {
@@ -229,6 +250,9 @@ function AdminDashboard() {
   );
   const [applicationsLoading, setApplicationsLoading] = useState(true);
   const [applicationsError, setApplicationsError] = useState("");
+  const [paymentLogs, setPaymentLogs] = useState([]);
+  const [paymentLogsLoading, setPaymentLogsLoading] = useState(true);
+  const [paymentLogsError, setPaymentLogsError] = useState("");
 
   const [sectors, setSectors] = useState([]);
   const [sectorsLoading, setSectorsLoading] = useState(true);
@@ -459,6 +483,71 @@ function AdminDashboard() {
     setApplicationsLoading(false);
   };
 
+  const loadPaymentLogs = async () => {
+    setPaymentLogsLoading(true);
+    setPaymentLogsError("");
+
+    const { data: paymentRows, error: paymentsError } = await supabase
+      .from("applications")
+      .select(
+        "id, application_code, project_name, sector_category, status, submitted_at, paid_at, payment_status, proponent_id",
+      )
+      .eq("payment_status", "completed")
+      .order("paid_at", { ascending: false });
+
+    if (paymentsError) {
+      setPaymentLogs([]);
+      setPaymentLogsError(paymentsError.message || "Failed to load payment logs.");
+      setPaymentLogsLoading(false);
+      return;
+    }
+
+    const payments = paymentRows ?? [];
+    if (payments.length === 0) {
+      setPaymentLogs([]);
+      setPaymentLogsLoading(false);
+      return;
+    }
+
+    const userIds = [...new Set(payments.map((row) => row.proponent_id).filter(Boolean))];
+
+    let usersById = new Map();
+    if (userIds.length > 0) {
+      const { data: userRows, error: usersError } = await supabase
+        .from("users")
+        .select("id, username, full_name, email")
+        .in("id", userIds);
+
+      if (usersError) {
+        setPaymentLogs([]);
+        setPaymentLogsError(usersError.message || "Failed to load payment user details.");
+        setPaymentLogsLoading(false);
+        return;
+      }
+
+      usersById = new Map((userRows ?? []).map((item) => [item.id, item]));
+    }
+
+    setPaymentLogs(
+      payments.map((payment) => {
+        const user = usersById.get(payment.proponent_id);
+        return {
+          id: payment.id,
+          applicationId: payment.application_code || payment.id,
+          projectName: payment.project_name || "Untitled Application",
+          category: payment.sector_category || "Not Selected",
+          status: mapPaymentLogStatusLabel(payment.status),
+          submittedDate: toDisplayDate(payment.submitted_at),
+          paidDate: toDisplayDate(payment.paid_at),
+          userName: user?.full_name || user?.username || "Unknown User",
+          userEmail: user?.email || "-",
+          amount: "Rs 500",
+        };
+      }),
+    );
+    setPaymentLogsLoading(false);
+  };
+
   const loadTemplates = async () => {
     setTemplatesLoading(true);
     setTemplatesError("");
@@ -486,6 +575,7 @@ function AdminDashboard() {
     loadSectors();
     loadApplications();
     loadTemplates();
+    loadPaymentLogs();
   }, []);
 
   useEffect(() => {
@@ -513,6 +603,10 @@ function AdminDashboard() {
     }
     if (path === "/admin-dashboard/templates") {
       setActiveView("templates");
+      return;
+    }
+    if (path === "/admin-dashboard/audit-logs") {
+      setActiveView("audit-logs");
       return;
     }
     if (path === "/admin-dashboard/templates/new") {
@@ -1054,6 +1148,7 @@ function AdminDashboard() {
                       sectors: "/admin-dashboard/sectors",
                       "sector-parameters": "/admin-dashboard/sector-parameters",
                       templates: "/admin-dashboard/templates",
+                      "audit-logs": "/admin-dashboard/audit-logs",
                     };
                     if (
                       item.key === "dashboard" ||
@@ -1061,7 +1156,8 @@ function AdminDashboard() {
                       item.key === "role-assignment" ||
                       item.key === "sectors" ||
                       item.key === "sector-parameters" ||
-                      item.key === "templates"
+                      item.key === "templates" ||
+                      item.key === "audit-logs"
                     ) {
                       navigate(routeMap[item.key]);
                     }
@@ -1225,6 +1321,14 @@ function AdminDashboard() {
                 onBack={openTemplatesList}
                 onEdit={openEditTemplate}
                 template={templates.find((template) => template.id === previewTemplateId)}
+              />
+            ) : null}
+            {activeView === "audit-logs" ? (
+              <AuditLogsPaymentsView
+                logs={paymentLogs}
+                loading={paymentLogsLoading}
+                error={paymentLogsError}
+                onRetry={loadPaymentLogs}
               />
             ) : null}
           </div>
@@ -1433,6 +1537,114 @@ function DashboardView({
         </article>
       </section>
     </>
+  );
+}
+
+function AuditLogsPaymentsView({ logs, loading, error, onRetry }) {
+  return (
+    <section className="space-y-4">
+      <div>
+        <h1 className="text-5xl font-semibold tracking-tight text-[#124734]">Audit Logs</h1>
+        <p className="mt-2 text-[29px] text-[#5a6f8d]">
+          Successful payments across all users.
+        </p>
+      </div>
+
+      <article className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="overflow-x-auto">
+          <table className="min-w-full">
+            <thead className="border-b border-slate-200 bg-[#f6f9f7]">
+              <tr>
+                <th className="px-5 py-3 text-left text-[20px] font-semibold text-[#536a87]">
+                  User
+                </th>
+                <th className="px-5 py-3 text-left text-[20px] font-semibold text-[#536a87]">
+                  Application ID
+                </th>
+                <th className="px-5 py-3 text-left text-[20px] font-semibold text-[#536a87]">
+                  Project Name
+                </th>
+                <th className="px-5 py-3 text-left text-[20px] font-semibold text-[#536a87]">
+                  Category
+                </th>
+                <th className="px-5 py-3 text-left text-[20px] font-semibold text-[#536a87]">
+                  Status
+                </th>
+                <th className="px-5 py-3 text-left text-[20px] font-semibold text-[#536a87]">
+                  Date Submitted
+                </th>
+                <th className="px-5 py-3 text-left text-[20px] font-semibold text-[#536a87]">
+                  Paid On
+                </th>
+                <th className="px-5 py-3 text-left text-[20px] font-semibold text-[#536a87]">
+                  Amount
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td className="px-5 py-7 text-[20px] text-[#5c6f89]" colSpan={8}>
+                    Loading payment logs...
+                  </td>
+                </tr>
+              ) : null}
+
+              {!loading && error ? (
+                <tr>
+                  <td className="px-5 py-7" colSpan={8}>
+                    <div className="flex items-center gap-3">
+                      <p className="text-[20px] font-medium text-rose-700">{error}</p>
+                      <button
+                        className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[18px] font-semibold text-[#124734] hover:bg-[#f2f8f4]"
+                        onClick={onRetry}
+                        type="button"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ) : null}
+
+              {!loading && !error && logs.length === 0 ? (
+                <tr>
+                  <td className="px-5 py-7 text-[20px] text-[#5c6f89]" colSpan={8}>
+                    No successful payments found.
+                  </td>
+                </tr>
+              ) : null}
+
+              {!loading && !error
+                ? logs.map((log) => (
+                    <tr className="border-b border-slate-100 last:border-b-0" key={log.id}>
+                      <td className="px-5 py-3">
+                        <p className="text-[20px] font-semibold text-[#1f3048]">{log.userName}</p>
+                        <p className="text-[17px] text-[#5c6f89]">{log.userEmail}</p>
+                      </td>
+                      <td className="px-5 py-3 text-[20px] font-semibold text-[#1f3048]">
+                        {log.applicationId}
+                      </td>
+                      <td className="px-5 py-3 text-[20px] text-[#1f3048]">{log.projectName}</td>
+                      <td className="px-5 py-3 text-[20px] text-[#5c6f89]">{log.category}</td>
+                      <td className="px-5 py-3">
+                        <span className="inline-flex rounded-md bg-blue-100 px-2.5 py-1 text-[16px] font-semibold text-blue-700">
+                          {log.status}
+                        </span>
+                      </td>
+                      <td className="px-5 py-3 text-[20px] text-[#5c6f89]">{log.submittedDate}</td>
+                      <td className="px-5 py-3 text-[20px] text-[#5c6f89]">{log.paidDate}</td>
+                      <td className="px-5 py-3 text-[20px] font-semibold text-[#124734]">
+                        {log.amount}
+                      </td>
+                    </tr>
+                  ))
+                : null}
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </section>
   );
 }
 

@@ -77,7 +77,7 @@ function AppRoutes() {
         }
       />
       <Route
-        path="/proponent-dashboard"
+        path="/proponent-dashboard/*"
         element={
           <ProtectedRoute allowedRoles={["proponent"]}>
             <ProponentDashboard />

@@ -8,7 +8,9 @@ import {
   FileText,
   LayoutDashboard,
   LogOut,
+  MessageSquareText,
   Search,
+  Send,
   Settings,
   ShieldCheck,
   Sparkles,
@@ -45,6 +47,9 @@ const sidebarItems = [
     route: "/mom-dashboard/finalized",
   },
 ];
+
+const LOCAL_AI_BACKEND_URL =
+  import.meta.env.VITE_AI_BACKEND_URL || "http://localhost:8787";
 
 function MoMDashboard() {
   const navigate = useNavigate();
@@ -993,9 +998,17 @@ function GistEditorPage({ caseItem, loading, isSaving, onBack, onSave }) {
 
 function MinutesEditorPage({ caseItem, loading, isSaving, onBack, onSaveDraft, onFinalize }) {
   const [form, setForm] = useState(() => buildTemplateState(caseItem));
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [chatError, setChatError] = useState("");
 
   useEffect(() => {
     setForm(buildTemplateState(caseItem));
+    setChatMessages([]);
+    setChatInput("");
+    setChatError("");
+    setIsChatLoading(false);
   }, [caseItem]);
 
   if (loading) {
@@ -1028,6 +1041,64 @@ function MinutesEditorPage({ caseItem, loading, isSaving, onBack, onSaveDraft, o
     setForm((current) => ({ ...current, [key]: value }));
   };
 
+  const sendChatMessage = async () => {
+    const message = chatInput.trim();
+    if (!message || isChatLoading) return;
+
+    if (!caseItem?.dbId) {
+      setChatError("Case context is missing. Reload and try again.");
+      return;
+    }
+
+    const historyForApi = chatMessages.map((item) => ({
+      role: item.role,
+      content: item.content,
+    }));
+
+    setChatMessages((current) => [...current, { role: "user", content: message }]);
+    setChatInput("");
+    setChatError("");
+    setIsChatLoading(true);
+
+    try {
+      const response = await fetch(`${LOCAL_AI_BACKEND_URL}/api/mom/chat-assist`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          applicationId: caseItem.dbId,
+          userMessage: message,
+          chatHistory: historyForApi,
+          minutesDraft: form,
+        }),
+      });
+
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload?.ok) {
+        throw new Error(payload?.error || "Failed to get AI assistant response.");
+      }
+
+      const assistantMessage =
+        typeof payload.assistantMessage === "string"
+          ? payload.assistantMessage.trim()
+          : "";
+
+      if (!assistantMessage) {
+        throw new Error("Assistant returned an empty response. Try again.");
+      }
+
+      setChatMessages((current) => [
+        ...current,
+        { role: "assistant", content: assistantMessage },
+      ]);
+    } catch (error) {
+      setChatError(error?.message || "AI assistant is temporarily unavailable.");
+    } finally {
+      setIsChatLoading(false);
+    }
+  };
+
   return (
     <section className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1048,59 +1119,133 @@ function MinutesEditorPage({ caseItem, loading, isSaving, onBack, onSaveDraft, o
         </button>
       </div>
 
-      <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <TemplateInput label="Meeting Title" onChange={onFieldChange("meetingTitle")} value={form.meetingTitle} />
-          <TemplateInput label="Meeting Type" onChange={onFieldChange("meetingType")} value={form.meetingType} />
-          <TemplateInput label="Date" onChange={onFieldChange("date")} type="date" value={form.date} />
-          <TemplateInput label="Time" onChange={onFieldChange("time")} type="time" value={form.time} />
-          <TemplateInput label="Location" onChange={onFieldChange("location")} value={form.location} />
-          <TemplateInput label="Chairperson" onChange={onFieldChange("chairperson")} value={form.chairperson} />
-          <TemplateInput label="Minute Taker" onChange={onFieldChange("minuteTaker")} value={form.minuteTaker} />
-        </div>
+      <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.7fr)_minmax(380px,1fr)]">
+        <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <TemplateInput label="Meeting Title" onChange={onFieldChange("meetingTitle")} value={form.meetingTitle} />
+            <TemplateInput label="Meeting Type" onChange={onFieldChange("meetingType")} value={form.meetingType} />
+            <TemplateInput label="Date" onChange={onFieldChange("date")} type="date" value={form.date} />
+            <TemplateInput label="Time" onChange={onFieldChange("time")} type="time" value={form.time} />
+            <TemplateInput label="Location" onChange={onFieldChange("location")} value={form.location} />
+            <TemplateInput label="Chairperson" onChange={onFieldChange("chairperson")} value={form.chairperson} />
+            <TemplateInput label="Minute Taker" onChange={onFieldChange("minuteTaker")} value={form.minuteTaker} />
+          </div>
 
-        <div className="mt-4 grid gap-3">
-          <TemplateTextArea label="Participants" onChange={onFieldChange("participants")} value={form.participants} />
-          <TemplateTextArea label="Agenda Items" onChange={onFieldChange("agendaItems")} value={form.agendaItems} />
-          <TemplateTextArea
-            label="Summary of Discussion"
-            onChange={onFieldChange("discussionSummary")}
-            value={form.discussionSummary}
-          />
-          <TemplateTextArea
-            label="Decisions Taken"
-            onChange={onFieldChange("decisionsTaken")}
-            value={form.decisionsTaken}
-          />
-          <TemplateTextArea label="Action Items" onChange={onFieldChange("actionItems")} value={form.actionItems} />
-          <TemplateTextArea label="Risks / Concerns Raised" onChange={onFieldChange("risks")} value={form.risks} />
-          <TemplateTextArea label="Next Steps" onChange={onFieldChange("nextSteps")} value={form.nextSteps} />
-          <TemplateInput
-            label="Next Meeting Schedule"
-            onChange={onFieldChange("nextMeetingSchedule")}
-            value={form.nextMeetingSchedule}
-          />
-        </div>
+          <div className="mt-4 grid gap-3">
+            <TemplateTextArea label="Participants" onChange={onFieldChange("participants")} value={form.participants} />
+            <TemplateTextArea label="Agenda Items" onChange={onFieldChange("agendaItems")} value={form.agendaItems} />
+            <TemplateTextArea
+              label="Summary of Discussion"
+              onChange={onFieldChange("discussionSummary")}
+              value={form.discussionSummary}
+            />
+            <TemplateTextArea
+              label="Decisions Taken"
+              onChange={onFieldChange("decisionsTaken")}
+              value={form.decisionsTaken}
+            />
+            <TemplateTextArea label="Action Items" onChange={onFieldChange("actionItems")} value={form.actionItems} />
+            <TemplateTextArea label="Risks / Concerns Raised" onChange={onFieldChange("risks")} value={form.risks} />
+            <TemplateTextArea label="Next Steps" onChange={onFieldChange("nextSteps")} value={form.nextSteps} />
+            <TemplateInput
+              label="Next Meeting Schedule"
+              onChange={onFieldChange("nextMeetingSchedule")}
+              value={form.nextMeetingSchedule}
+            />
+          </div>
 
-        <div className="mt-5 flex flex-wrap items-center gap-3">
-          <button
-            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-[20px] font-semibold text-[#124734] hover:bg-[#f2f8f4] disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={isSaving}
-            onClick={() => onSaveDraft(caseItem.id, form)}
-            type="button"
-          >
-            Save Draft
-          </button>
-          <button
-            className="inline-flex items-center gap-2 rounded-xl bg-[#124734] px-4 py-2.5 text-[20px] font-semibold text-white shadow-[0_12px_24px_rgba(18,71,52,0.2)] hover:bg-[#0f3a2b] disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={isSaving}
-            onClick={() => onFinalize(caseItem.id, form)}
-            type="button"
-          >
-            Finalize Minutes
-          </button>
-        </div>
-      </article>
+          <div className="mt-5 flex flex-wrap items-center gap-3">
+            <button
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-[20px] font-semibold text-[#124734] hover:bg-[#f2f8f4] disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={isSaving}
+              onClick={() => onSaveDraft(caseItem.id, form)}
+              type="button"
+            >
+              Save Draft
+            </button>
+            <button
+              className="inline-flex items-center gap-2 rounded-xl bg-[#124734] px-4 py-2.5 text-[20px] font-semibold text-white shadow-[0_12px_24px_rgba(18,71,52,0.2)] hover:bg-[#0f3a2b] disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={isSaving}
+              onClick={() => onFinalize(caseItem.id, form)}
+              type="button"
+            >
+              Finalize Minutes
+            </button>
+          </div>
+        </article>
+
+        <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm xl:sticky xl:top-24 xl:min-h-[68vh]">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-violet-100 text-violet-700">
+              <MessageSquareText className="h-5 w-5" />
+            </span>
+            <div>
+              <h2 className="text-[28px] font-semibold tracking-tight text-[#111f3b]">
+                AI Assistant
+              </h2>
+              <p className="text-[18px] text-[#5a6f8d]">
+                Ask for help drafting or refining meeting minutes.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-4 h-[360px] min-h-[320px] max-h-[72vh] resize-y space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-[#f9fbfa] p-4 sm:h-[420px] xl:h-[48vh]">
+            {chatMessages.length === 0 ? (
+              <p className="text-[18px] text-[#5a6f8d]">
+                Start by asking the assistant to summarize agenda points, improve wording,
+                or draft decisions from your meeting context.
+              </p>
+            ) : (
+              chatMessages.map((message, index) => (
+                <div
+                  className={`max-w-[92%] rounded-xl px-4 py-2 text-[18px] ${
+                    message.role === "user"
+                      ? "ml-auto bg-[#124734] text-white"
+                      : "mr-auto border border-slate-200 bg-white text-[#1f3048]"
+                  }`}
+                  key={`${message.role}-${index}`}
+                >
+                  {message.content}
+                </div>
+              ))
+            )}
+
+            {isChatLoading ? (
+              <div className="mr-auto inline-flex rounded-xl border border-slate-200 bg-white px-4 py-2 text-[18px] text-[#5a6f8d]">
+                AI is thinking...
+              </div>
+            ) : null}
+          </div>
+
+          {chatError ? (
+            <p className="mt-3 text-[17px] font-semibold text-rose-600">{chatError}</p>
+          ) : null}
+
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+            <input
+              className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-[18px] text-[#1f3048] outline-none placeholder:text-slate-400 focus:border-[#124734] focus:ring-2 focus:ring-[#124734]/10"
+              onChange={(event) => setChatInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  sendChatMessage();
+                }
+              }}
+              placeholder="Ask AI to help draft minutes..."
+              value={chatInput}
+            />
+            <button
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#124734] px-4 text-[18px] font-semibold text-white shadow-[0_12px_24px_rgba(18,71,52,0.2)] hover:bg-[#0f3a2b] disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={isChatLoading || !chatInput.trim()}
+              onClick={sendChatMessage}
+              type="button"
+            >
+              <Send className="h-4 w-4" />
+              Send
+            </button>
+          </div>
+        </article>
+      </div>
     </section>
   );
 }
