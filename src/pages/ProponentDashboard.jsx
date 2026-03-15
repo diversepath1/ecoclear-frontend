@@ -96,16 +96,10 @@ function ProponentDashboard() {
     ];
   }, [applications]);
 
-  const trendBars = [
-    { label: "Mar", height: "40%" },
-    { label: "Apr", height: "65%" },
-    { label: "May", height: "35%" },
-    { label: "Jun", height: "80%" },
-    { label: "Jul", height: "55%" },
-    { label: "Aug", height: "95%" },
-    { label: "Sep", height: "50%" },
-    { label: "Oct", height: "75%" },
-  ];
+  const trendBars = useMemo(
+    () => buildApplicationTrendBars(applications),
+    [applications],
+  );
 
   const recentApplications = applications.slice(0, 5);
   const successfulPayments = useMemo(
@@ -1995,6 +1989,49 @@ function WorkflowStagesView({ application, onClose }) {
 
 function formatCount(value) {
   return String(value).padStart(2, "0");
+}
+
+function buildApplicationTrendBars(applications) {
+  const months = [
+    { key: 2, label: "MAR" },
+    { key: 3, label: "APR" },
+    { key: 4, label: "MAY" },
+    { key: 5, label: "JUN" },
+    { key: 6, label: "JUL" },
+    { key: 7, label: "AUG" },
+    { key: 8, label: "SEP" },
+    { key: 9, label: "OCT" },
+  ];
+  const monthCounts = new Map(months.map((month) => [month.key, 0]));
+
+  applications.forEach((application) => {
+    const sourceDate = application?.submittedAtIso || application?.createdAtIso;
+    if (!sourceDate) return;
+
+    const parsedDate = new Date(sourceDate);
+    if (Number.isNaN(parsedDate.getTime())) return;
+
+    const monthKey = parsedDate.getMonth();
+    if (!monthCounts.has(monthKey)) return;
+
+    monthCounts.set(monthKey, (monthCounts.get(monthKey) ?? 0) + 1);
+  });
+
+  const values = months.map((month) => monthCounts.get(month.key) || 0);
+  const maxValue = Math.max(...values, 0);
+
+  return months.map((month) => {
+    const count = monthCounts.get(month.key) ?? 0;
+    if (count === 0 || maxValue === 0) {
+      return { label: month.label, height: "0%" };
+    }
+
+    const normalizedHeight = Math.round((count / maxValue) * 95);
+    return {
+      label: month.label,
+      height: `${Math.max(24, normalizedHeight)}%`,
+    };
+  });
 }
 
 function formatRoleLabel(value) {

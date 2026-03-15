@@ -648,12 +648,6 @@ function MomDashboardView({
               Gists are auto-created when scrutiny approves and refers cases.
             </p>
           </div>
-          <button
-            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-[20px] font-semibold text-slate-700 hover:bg-slate-50"
-            type="button"
-          >
-            Filter
-          </button>
         </div>
         <MomCasesTable
           casesError={casesError}
@@ -889,12 +883,6 @@ function MomCasesTable({
 
                 {row.status === "Finalized" ? (
                   <div className="flex items-center gap-2">
-                    <button
-                      className="rounded-lg border border-slate-200 bg-white p-2 text-[#567091] hover:bg-slate-50"
-                      type="button"
-                    >
-                      <Search className="h-4 w-4" />
-                    </button>
                     <details className="relative inline-block text-left">
                       <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[18px] font-semibold text-[#124734] hover:bg-[#f2f8f4]">
                         <Download className="h-4 w-4" />
